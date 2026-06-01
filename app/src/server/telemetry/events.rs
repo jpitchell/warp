@@ -435,7 +435,9 @@ pub enum CommandXRayTrigger {
 pub enum PaletteSource {
     PrefixChange,
     Keybinding,
-    CtrlTab { shift_pressed_initially: bool },
+    CtrlTab {
+        shift_pressed_initially: bool,
+    },
     WarpDrive,
     QuitModal,
     LogOutModal,
@@ -445,6 +447,8 @@ pub enum PaletteSource {
     PaneHeader,
     AgentTip,
     TitleBarSearchBar,
+    /// Opened by clicking an ambiguous file link (multiple repo matches) in CLI agent output.
+    FileLink,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]

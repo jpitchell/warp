@@ -512,9 +512,12 @@ fn alt_screen_file_links_gated_by_flag_setting_and_cli_agent_session() {
         });
 
         // Flag enabled + setting OFF + session present -> not detected (user opt-out).
-        crate::terminal::general_settings::GeneralSettings::handle(&app).update(&mut app, |settings, ctx| {
-            let _ = settings.cli_agent_file_links.set_value(false, ctx);
-        });
+        crate::terminal::general_settings::GeneralSettings::handle(&app).update(
+            &mut app,
+            |settings, ctx| {
+                let _ = settings.cli_agent_file_links.set_value(false, ctx);
+            },
+        );
         terminal.update(&mut app, |view, ctx| {
             let _flag = FeatureFlag::CliAgentFileLinks.override_enabled(true);
             assert!(
@@ -524,9 +527,12 @@ fn alt_screen_file_links_gated_by_flag_setting_and_cli_agent_session() {
         });
 
         // Setting back on + Codex session -> detected (multi-agent coverage).
-        crate::terminal::general_settings::GeneralSettings::handle(&app).update(&mut app, |settings, ctx| {
-            let _ = settings.cli_agent_file_links.set_value(true, ctx);
-        });
+        crate::terminal::general_settings::GeneralSettings::handle(&app).update(
+            &mut app,
+            |settings, ctx| {
+                let _ = settings.cli_agent_file_links.set_value(true, ctx);
+            },
+        );
         set_session(&mut app, view_id, CLIAgent::Codex);
         terminal.update(&mut app, |view, ctx| {
             let _flag = FeatureFlag::CliAgentFileLinks.override_enabled(true);
@@ -536,6 +542,198 @@ fn alt_screen_file_links_gated_by_flag_setting_and_cli_agent_session() {
             );
         });
     })
+}
+
+// Tests for the CLI-agent repo-index fallback: when a reference doesn't resolve relative to the
+// agent's cwd, we match it against the repo file index by filename / path-suffix. These exercise
+// the pure matching + branching logic (no filesystem) via `compute_repo_index_link`.
+#[cfg(feature = "local_fs")]
+mod cli_agent_repo_index_fallback {
+    use warp_util::path::CleanPathResult;
+
+    use crate::search::files::search_item::FileSearchResult;
+    use crate::terminal::model::grid::grid_handler::PossiblePath;
+    use crate::terminal::model::index::Point;
+    use crate::terminal::model::terminal_model::WithinModel;
+    use crate::terminal::view::link_detection::GridHighlightedLink;
+    use crate::terminal::view::TerminalView;
+
+    fn token(reference: &str) -> WithinModel<PossiblePath> {
+        WithinModel::AltScreen(PossiblePath {
+            path: CleanPathResult {
+                path: reference.to_string(),
+                line_and_column_num: None,
+            },
+            range: Point::default()..=Point::default(),
+        })
+    }
+
+    fn file(path: &str, project_directory: &str) -> FileSearchResult {
+        FileSearchResult {
+            path: path.to_string(),
+            project_directory: project_directory.to_string(),
+            is_directory: false,
+        }
+    }
+
+    #[test]
+    fn single_repo_match_resolves_to_file_link() {
+        let repo = vec![
+            file("app/src/search/files/model.rs", "/repo"),
+            file("app/src/main.rs", "/repo"),
+        ];
+        let candidates = [token("model.rs")];
+
+        let link = TerminalView::compute_repo_index_link(&candidates, &repo)
+            .expect("a single repo match should linkify");
+        match link {
+            GridHighlightedLink::File(file_link) => {
+                assert_eq!(
+                    file_link.get_inner().absolute_path(),
+                    Some(std::path::PathBuf::from(
+                        "/repo/app/src/search/files/model.rs"
+                    ))
+                );
+            }
+            other => panic!("expected a File link for a unique match, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multiple_repo_matches_produce_ambiguous_link() {
+        let repo = vec![
+            file("app/src/search/files/mod.rs", "/repo"),
+            file("app/src/pane_group/mod.rs", "/repo"),
+            file("app/src/main.rs", "/repo"),
+        ];
+        let candidates = [token("mod.rs")];
+
+        let link = TerminalView::compute_repo_index_link(&candidates, &repo)
+            .expect("multiple repo matches should still linkify");
+        match link {
+            GridHighlightedLink::AmbiguousFile(ambiguous) => {
+                assert_eq!(ambiguous.get_inner().query, "mod.rs");
+            }
+            other => panic!("expected an AmbiguousFile link for 2+ matches, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_repo_match_produces_no_link() {
+        let repo = vec![file("app/src/main.rs", "/repo")];
+        let candidates = [token("does_not_exist.rs")];
+
+        assert!(
+            TerminalView::compute_repo_index_link(&candidates, &repo).is_none(),
+            "a reference with no repo match should not linkify"
+        );
+    }
+
+    #[test]
+    fn partial_path_token_matches_only_component_aligned_suffix() {
+        let repo = vec![
+            file("app/src/search/files/model.rs", "/repo"),
+            file("app/src/other/model.rs", "/repo"),
+        ];
+        // `files/model.rs` should match only the file under `files/`, not the other `model.rs`.
+        let candidates = [token("files/model.rs")];
+
+        let link = TerminalView::compute_repo_index_link(&candidates, &repo)
+            .expect("the partial-path token should match exactly one file");
+        match link {
+            GridHighlightedLink::File(file_link) => {
+                assert_eq!(
+                    file_link.get_inner().absolute_path(),
+                    Some(std::path::PathBuf::from(
+                        "/repo/app/src/search/files/model.rs"
+                    ))
+                );
+            }
+            other => panic!("expected a unique File link, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn directories_are_not_matched() {
+        let mut dir = file("app/src/search/files", "/repo");
+        dir.is_directory = true;
+        let repo = vec![dir];
+        let candidates = [token("files")];
+
+        assert!(
+            TerminalView::compute_repo_index_link(&candidates, &repo).is_none(),
+            "directory entries should be skipped by the file-link fallback"
+        );
+    }
+
+    #[test]
+    fn repo_path_matches_token_rules() {
+        // Exact whole-path match.
+        assert!(TerminalView::repo_path_matches_token(
+            "app/src/main.rs",
+            "app/src/main.rs"
+        ));
+        // Bare filename matches any file with that basename.
+        assert!(TerminalView::repo_path_matches_token(
+            "app/src/main.rs",
+            "main.rs"
+        ));
+        // Component-aligned suffix.
+        assert!(TerminalView::repo_path_matches_token(
+            "app/src/search/files/model.rs",
+            "files/model.rs"
+        ));
+        // Shorthand path that skips intermediate directories (e.g. `crates/` and `src/`).
+        assert!(TerminalView::repo_path_matches_token(
+            "crates/warp_features/src/lib.rs",
+            "warp_features/lib.rs"
+        ));
+        // Leading dirs must still appear in order: reversed order -> no match.
+        assert!(!TerminalView::repo_path_matches_token(
+            "crates/warp_features/src/lib.rs",
+            "lib/warp_features.rs"
+        ));
+        // Basename must match exactly (mid-component) -> no match.
+        assert!(!TerminalView::repo_path_matches_token(
+            "app/src/xmain.rs",
+            "main.rs"
+        ));
+        // Leading directory component not present in the path -> no match.
+        assert!(!TerminalView::repo_path_matches_token(
+            "app/src/other/model.rs",
+            "files/model.rs"
+        ));
+        // Unrelated path -> no match.
+        assert!(!TerminalView::repo_path_matches_token(
+            "app/src/main.rs",
+            "other.rs"
+        ));
+    }
+
+    #[test]
+    fn shorthand_path_skipping_intermediate_dirs_resolves() {
+        let repo = vec![
+            file("crates/warp_features/src/lib.rs", "/repo"),
+            file("crates/warp_core/src/lib.rs", "/repo"),
+            file("app/src/lib.rs", "/repo"),
+        ];
+        // `warp_features/lib.rs` omits `crates/` and `src/` but should still resolve uniquely.
+        let candidates = [token("warp_features/lib.rs")];
+
+        let link = TerminalView::compute_repo_index_link(&candidates, &repo)
+            .expect("shorthand path should resolve to the matching lib.rs");
+        match link {
+            GridHighlightedLink::File(file_link) => {
+                assert_eq!(
+                    file_link.get_inner().absolute_path(),
+                    Some(std::path::PathBuf::from(
+                        "/repo/crates/warp_features/src/lib.rs"
+                    ))
+                );
+            }
+            other => panic!("expected a unique File link, got {other:?}"),
+        }
+    }
 }
 
 #[test]

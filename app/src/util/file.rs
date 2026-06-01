@@ -123,6 +123,22 @@ impl ContainsPoint for FileLink {
     }
 }
 
+/// A file reference that resolved to more than one candidate in the repo file index (e.g. a bare
+/// filename like `mod.rs` that exists in several directories). Rather than guessing, clicking it
+/// opens the command-palette Files mode pre-filled with `query` so the user picks the right one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AmbiguousFileLink {
+    pub link: Link,
+    /// Query to pre-fill the Files palette with (the referenced file name / partial path).
+    pub query: String,
+}
+
+impl ContainsPoint for AmbiguousFileLink {
+    fn contains(&self, point: Point) -> bool {
+        self.link.contains(point)
+    }
+}
+
 /// Creates the file at the given path if it doesn't already exist, opening it
 /// in write mode. If any directories in the path are missing, those are created
 /// as well.

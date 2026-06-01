@@ -1910,6 +1910,9 @@ pub enum Event {
     OpenEnvironmentManagementPane,
     OpenFilesPalette {
         source: PaletteSource,
+        /// When set, opens the Files palette pre-filled with this query (used by ambiguous
+        /// CLI-agent file links so the user can pick among multiple matches).
+        initial_query: Option<String>,
     },
     #[cfg(feature = "local_fs")]
     OpenFileWithTarget {
@@ -16288,6 +16291,14 @@ impl TerminalView {
                         })
                         .unwrap_or_default()
                     }
+                    #[cfg(feature = "local_fs")]
+                    GridHighlightedLink::AmbiguousFile(_) => {
+                        vec![MenuItemFields::new("Open file…")
+                            .with_on_select_action(TerminalAction::OpenGridLink(
+                                highlighted_link.clone(),
+                            ))
+                            .into_item()]
+                    }
                 }
             }
             (
@@ -18010,6 +18021,22 @@ impl TerminalView {
         });
     }
 
+    /// Opens the command-palette Files mode pre-filled with `query`. Used when a CLI-agent file
+    /// reference matched multiple repo files, so the user disambiguates rather than us guessing.
+    #[cfg(feature = "local_fs")]
+    fn open_ambiguous_file_link(&mut self, query: String, ctx: &mut ViewContext<Self>) {
+        // Dismiss the grid tooltip explicitly: unlike opening a single file (which switches away
+        // from the terminal), opening the palette leaves the terminal on screen, so a lingering
+        // tooltip would re-render detached from its now-cleared link anchor. The tooltip-click path
+        // already dismisses; this also covers the Cmd+Click path.
+        self.dismiss_tooltips(ctx);
+        ctx.notify();
+        ctx.emit(Event::OpenFilesPalette {
+            source: PaletteSource::FileLink,
+            initial_query: Some(query),
+        });
+    }
+
     #[cfg(feature = "local_fs")]
     fn open_file_path_with_target(
         &mut self,
@@ -18050,6 +18077,11 @@ impl TerminalView {
                 if let Some(path) = link.absolute_path() {
                     self.open_file_path(path, link.line_and_column_num, ctx);
                 }
+            }
+            #[cfg(feature = "local_fs")]
+            GridHighlightedLink::AmbiguousFile(link) if link.contains(position) => {
+                let query = link.get_inner().query.clone();
+                self.open_ambiguous_file_link(query, ctx);
             }
             GridHighlightedLink::Url(url) if url.contains(position) => {
                 let model = self.model.lock();
@@ -21199,9 +21231,10 @@ impl TerminalView {
             InputEvent::OpenEnvironmentManagementPane => {
                 self.open_environment_management_pane(ctx);
             }
-            InputEvent::OpenFilesPalette { source } => {
-                ctx.emit(Event::OpenFilesPalette { source: *source })
-            }
+            InputEvent::OpenFilesPalette { source } => ctx.emit(Event::OpenFilesPalette {
+                source: *source,
+                initial_query: None,
+            }),
             InputEvent::TryHandlePassiveCodeDiff(action) => {
                 self.resolve_prompt_suggestion_diff(action.clone(), ctx);
             }
@@ -26692,7 +26725,10 @@ impl TypedActionView for TerminalView {
             PickRepoToOpen => {
                 ctx.dispatch_typed_action(&WorkspaceAction::OpenRepository { path: None });
             }
-            OpenFilesPalette { source } => ctx.emit(Event::OpenFilesPalette { source: *source }),
+            OpenFilesPalette { source } => ctx.emit(Event::OpenFilesPalette {
+                source: *source,
+                initial_query: None,
+            }),
             DismissCodeToolbeltTooltip => {
                 CodeSettings::handle(ctx).update(ctx, |settings, ctx| {
                     if let Err(e) = settings

@@ -15959,8 +15959,16 @@ impl Workspace {
                     });
                 }
             }
-            pane_group::Event::OpenFilesPalette { source } => {
-                self.open_palette_action(PaletteMode::Files, *source, None, ctx);
+            pane_group::Event::OpenFilesPalette {
+                source,
+                initial_query,
+            } => {
+                self.open_palette_action(
+                    PaletteMode::Files,
+                    *source,
+                    initial_query.as_deref(),
+                    ctx,
+                );
             }
             pane_group::Event::ToggleLeftPanel {
                 target_view,

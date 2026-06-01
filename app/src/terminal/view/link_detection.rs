@@ -17,10 +17,14 @@ cfg_if::cfg_if! {
         use crate::{
             terminal::model::grid::grid_handler,
             terminal::ShellLaunchData,
-            util::file::{FileLink, absolute_path_if_valid, ShellPathType},
+            util::file::{AmbiguousFileLink, FileLink, absolute_path_if_valid, ShellPathType},
             util::openable_file_type::FileTarget,
         };
+        use crate::search::files::model::FileSearchModel;
+        use crate::search::files::search_item::FileSearchResult;
+        use std::collections::HashMap;
         use std::path::PathBuf;
+        use std::sync::Arc;
         use warp_util::path::CleanPathResult;
         use warp_util::path::LineAndColumnArg;
         use warpui::{AppContext, SingletonEntity};
@@ -40,12 +44,38 @@ const PREFIXES_TO_REMOVE: [&str; 2] = ["a/", "b/"];
 #[cfg(feature = "local_fs")]
 const SUFFIXES_TO_REMOVE: [&str; 1] = ["@"];
 
+/// Returns the final path component of `path`, splitting on either separator so it works for both
+/// repo-relative paths (platform separator) and agent-printed tokens (often forward slashes).
+#[cfg(feature = "local_fs")]
+fn file_basename(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+/// Wraps `inner` in the same model location (alt screen vs. block list) as `possible_path`, so a
+/// link inherits the position of the candidate path it was derived from.
+#[cfg(feature = "local_fs")]
+fn wrap_within_model<T>(
+    inner: T,
+    possible_path: &WithinModel<grid_handler::PossiblePath>,
+) -> WithinModel<T> {
+    match possible_path {
+        WithinModel::AltScreen(_) => WithinModel::AltScreen(inner),
+        WithinModel::BlockList(block) => {
+            WithinModel::BlockList(WithinBlock::new(inner, block.block_index, block.grid))
+        }
+    }
+}
+
 /// Highlighted link within a terminal model grid.
 #[derive(Debug, Clone)]
 pub enum GridHighlightedLink {
     Url(WithinModel<Link>),
     #[cfg(feature = "local_fs")]
     File(WithinModel<FileLink>),
+    /// A file reference that matched multiple repo files (see [`AmbiguousFileLink`]); clicking it
+    /// opens the Files palette pre-filled so the user disambiguates.
+    #[cfg(feature = "local_fs")]
+    AmbiguousFile(WithinModel<AmbiguousFileLink>),
 }
 
 impl GridHighlightedLink {
@@ -54,6 +84,8 @@ impl GridHighlightedLink {
             GridHighlightedLink::Url(url) => url.contains(position),
             #[cfg(feature = "local_fs")]
             GridHighlightedLink::File(file_link) => file_link.contains(position),
+            #[cfg(feature = "local_fs")]
+            GridHighlightedLink::AmbiguousFile(link) => link.contains(position),
         }
     }
 
@@ -71,6 +103,8 @@ impl GridHighlightedLink {
             }
             #[cfg(feature = "local_fs")]
             GridHighlightedLink::File(_) => "Open file",
+            #[cfg(feature = "local_fs")]
+            GridHighlightedLink::AmbiguousFile(_) => "Open file…",
             GridHighlightedLink::Url(_) => "Open link",
         }
     }
@@ -89,6 +123,10 @@ impl Serialize for GridHighlightedLink {
             GridHighlightedLink::File(_) => {
                 serializer.serialize_unit_variant("HighlightedLink", 1, "File")
             }
+            #[cfg(feature = "local_fs")]
+            GridHighlightedLink::AmbiguousFile(_) => {
+                serializer.serialize_unit_variant("HighlightedLink", 2, "AmbiguousFile")
+            }
         }
     }
 }
@@ -101,6 +139,10 @@ impl TryFrom<GridHighlightedLink> for Link {
             GridHighlightedLink::Url(WithinModel::AltScreen(url)) => Ok(url),
             #[cfg(feature = "local_fs")]
             GridHighlightedLink::File(WithinModel::AltScreen(file_link)) => Ok(file_link.link),
+            #[cfg(feature = "local_fs")]
+            GridHighlightedLink::AmbiguousFile(WithinModel::AltScreen(ambiguous)) => {
+                Ok(ambiguous.link)
+            }
             _ => Err(anyhow::anyhow!(
                 "HighlightedLink is not within the alt screen"
             )),
@@ -117,6 +159,10 @@ impl TryFrom<GridHighlightedLink> for WithinBlock<Link> {
             #[cfg(feature = "local_fs")]
             GridHighlightedLink::File(WithinModel::BlockList(file_link)) => {
                 Ok(file_link.map(|file_link| file_link.link))
+            }
+            #[cfg(feature = "local_fs")]
+            GridHighlightedLink::AmbiguousFile(WithinModel::BlockList(ambiguous)) => {
+                Ok(ambiguous.map(|ambiguous| ambiguous.link))
             }
             _ => Err(anyhow::anyhow!(
                 "HighlightedLink is not within the block list"
@@ -206,6 +252,24 @@ impl HighlightedLinkOption {
                     model
                         .alt_screen_mut()
                         .set_smart_select_override(file_link.link.range.clone());
+                }
+            },
+            #[cfg(feature = "local_fs")]
+            GridHighlightedLink::AmbiguousFile(within_model) => match within_model {
+                WithinModel::BlockList(within_block) => {
+                    let point_range = WithinBlock::new(
+                        within_block.inner.link.range.clone(),
+                        within_block.block_index,
+                        within_block.grid,
+                    );
+                    model
+                        .block_list_mut()
+                        .set_smart_select_override(point_range);
+                }
+                WithinModel::AltScreen(ambiguous_link) => {
+                    model
+                        .alt_screen_mut()
+                        .set_smart_select_override(ambiguous_link.link.range.clone());
                 }
             },
         }
@@ -385,6 +449,11 @@ impl super::TerminalView {
                     self.open_file_path(path.clone(), link.line_and_column_num, ctx);
                 }
             }
+            #[cfg(feature = "local_fs")]
+            GridHighlightedLink::AmbiguousFile(link) => {
+                let query = link.get_inner().query.clone();
+                self.open_ambiguous_file_link(query, ctx);
+            }
             GridHighlightedLink::Url(url) => {
                 let model = self.model.lock();
                 ctx.open_url(&model.link_at_range(url, RespectObfuscatedSecrets::No));
@@ -467,6 +536,14 @@ impl super::TerminalView {
                     .and_then(|active_session_id| self.sessions.as_ref(ctx).get(active_session_id))
                     .and_then(|active_session| active_session.launch_data().cloned());
 
+                // For CLI agent TUIs, snapshot the repo file index on the main thread (the
+                // background scan thread has no AppContext) so we can fall back to a repo-wide
+                // filename lookup when a reference doesn't resolve relative to the cwd. `None` in
+                // normal terminal mode keeps behavior — and cost — exactly as before.
+                let cli_agent_repo_files = self
+                    .should_detect_cli_agent_file_links(ctx)
+                    .then(|| FileSearchModel::as_ref(ctx).get_repo_contents(ctx));
+
                 // Using the thread builder instead of ctx.spawn here so that the previous
                 // scanning job will be dropped once there is a new scanning job created.
                 let (tx, rx) = futures::channel::oneshot::channel();
@@ -478,6 +555,7 @@ impl super::TerminalView {
                             possible_paths,
                             max_columns,
                             shell_launch_data,
+                            cli_agent_repo_files,
                         );
                         let _ = tx.send(paths);
                     })
@@ -515,9 +593,13 @@ impl super::TerminalView {
         possible_paths: impl Iterator<Item = WithinModel<grid_handler::PossiblePath>>,
         max_columns: usize,
         shell_launch_data: Option<ShellLaunchData>,
+        cli_agent_repo_files: Option<Arc<Vec<FileSearchResult>>>,
     ) -> Option<GridHighlightedLink> {
+        // Collect up front so the candidates can be reused by the CLI-agent repo-index fallback
+        // below if none of them resolve relative to the working directory.
+        let possible_paths: Vec<_> = possible_paths.collect();
         let mut link = None;
-        'path_loop: for within_model_possible_path in possible_paths {
+        'path_loop: for within_model_possible_path in &possible_paths {
             let possible_path = within_model_possible_path.get_inner();
             // We want to check if the clean path result is a valid path and get the canonical
             // absolute path back.
@@ -532,7 +614,7 @@ impl super::TerminalView {
                     absolute_path,
                     possible_path.path.line_and_column_num,
                     possible_path.range.clone(),
-                    &within_model_possible_path,
+                    within_model_possible_path,
                 ));
                 break;
             }
@@ -560,7 +642,7 @@ impl super::TerminalView {
                             absolute_path,
                             new_possible_cleaned_path.line_and_column_num,
                             new_start_point..=*possible_path.range.end(),
-                            &within_model_possible_path,
+                            within_model_possible_path,
                         ));
 
                         // break outer_loop
@@ -592,7 +674,7 @@ impl super::TerminalView {
                             absolute_path,
                             new_possible_cleaned_path.line_and_column_num,
                             *possible_path.range.start()..=new_end_point,
-                            &within_model_possible_path,
+                            within_model_possible_path,
                         ));
 
                         // break outer_loop
@@ -602,7 +684,144 @@ impl super::TerminalView {
             }
         }
 
-        link.map(GridHighlightedLink::File)
+        if let Some(link) = link {
+            return Some(GridHighlightedLink::File(link));
+        }
+
+        // No path resolved relative to the working directory. For CLI agent TUIs, fall back to the
+        // repo file index: a bare filename (or partial path) the agent printed often lives
+        // elsewhere in the repo. One match opens directly; several open the Files palette pre-filled
+        // so the user disambiguates.
+        if let Some(repo_files) = cli_agent_repo_files {
+            return Self::compute_repo_index_link(&possible_paths, &repo_files);
+        }
+
+        None
+    }
+
+    /// Fallback used for CLI agent TUIs: match each candidate token against the repo file index by
+    /// filename / path-suffix. Returns the first candidate that matches at least one repo file —
+    /// a [`GridHighlightedLink::File`] for a unique match, or a
+    /// [`GridHighlightedLink::AmbiguousFile`] (palette picker) for several.
+    pub(crate) fn compute_repo_index_link(
+        possible_paths: &[WithinModel<grid_handler::PossiblePath>],
+        repo_files: &[FileSearchResult],
+    ) -> Option<GridHighlightedLink> {
+        if possible_paths.is_empty() {
+            return None;
+        }
+
+        // A single hover can yield hundreds of candidate tokens, so index the (non-directory) repo
+        // files by basename once and do an O(1) lookup per candidate instead of sweeping all files
+        // for every candidate. The candidate-aligned suffix check is then applied only to the small
+        // set sharing the basename.
+        let mut files_by_basename: HashMap<&str, Vec<&FileSearchResult>> = HashMap::new();
+        for file in repo_files {
+            if file.is_directory {
+                continue;
+            }
+            files_by_basename
+                .entry(file_basename(&file.path))
+                .or_default()
+                .push(file);
+        }
+
+        for within_model_possible_path in possible_paths {
+            let possible_path = within_model_possible_path.get_inner();
+            let token = possible_path.path.path.as_str();
+            if token.is_empty() {
+                continue;
+            }
+
+            let Some(candidate_files) = files_by_basename.get(file_basename(token)) else {
+                continue;
+            };
+
+            // Distinct absolute paths whose repo-relative path matches the token.
+            let mut matches: Vec<PathBuf> = Vec::new();
+            for file in candidate_files {
+                if !Self::repo_path_matches_token(&file.path, token) {
+                    continue;
+                }
+                let absolute_path = PathBuf::from(&file.project_directory).join(&file.path);
+                if !matches.contains(&absolute_path) {
+                    matches.push(absolute_path);
+                }
+            }
+
+            match matches.len() {
+                0 => continue,
+                1 => {
+                    let absolute_path = matches.into_iter().next().expect("len checked");
+                    return Some(GridHighlightedLink::File(Self::create_valid_link(
+                        absolute_path,
+                        possible_path.path.line_and_column_num,
+                        possible_path.range.clone(),
+                        within_model_possible_path,
+                    )));
+                }
+                _ => {
+                    return Some(Self::create_ambiguous_link(
+                        token.to_string(),
+                        possible_path.range.clone(),
+                        within_model_possible_path,
+                    ));
+                }
+            }
+        }
+
+        None
+    }
+
+    /// True when a repo-relative path (e.g. `crates/warp_features/src/lib.rs`) is referred to by
+    /// `token`. The file name must match exactly, and any leading directory components in the token
+    /// must appear, in order, as a subsequence of the path's directory components — tolerating
+    /// omitted intermediates. So a bare `lib.rs` matches any `lib.rs`, and the shorthand
+    /// `warp_features/lib.rs` matches `crates/warp_features/src/lib.rs` (skipping `crates/` and
+    /// `src/`), while `other/lib.rs` does not. Both separators are accepted in the token.
+    pub(crate) fn repo_path_matches_token(repo_relative_path: &str, token: &str) -> bool {
+        let path_components: Vec<&str> = repo_relative_path
+            .split(['/', '\\'])
+            .filter(|component| !component.is_empty())
+            .collect();
+        let token_components: Vec<&str> = token
+            .split(['/', '\\'])
+            .filter(|component| !component.is_empty())
+            .collect();
+
+        let (Some(token_basename), Some(path_basename)) =
+            (token_components.last(), path_components.last())
+        else {
+            return false;
+        };
+
+        // The file name itself must match exactly.
+        if token_basename != path_basename {
+            return false;
+        }
+
+        // Leading token directories must be an ordered subsequence of the path's directories.
+        let token_dirs = &token_components[..token_components.len() - 1];
+        let path_dirs = &path_components[..path_components.len() - 1];
+        let mut remaining_path_dirs = path_dirs.iter();
+        token_dirs
+            .iter()
+            .all(|token_dir| remaining_path_dirs.any(|path_dir| path_dir == token_dir))
+    }
+
+    fn create_ambiguous_link(
+        query: String,
+        path_range: std::ops::RangeInclusive<Point>,
+        possible_path: &WithinModel<grid_handler::PossiblePath>,
+    ) -> GridHighlightedLink {
+        let inner_link = AmbiguousFileLink {
+            link: Link {
+                range: path_range,
+                is_empty: false,
+            },
+            query,
+        };
+        GridHighlightedLink::AmbiguousFile(wrap_within_model(inner_link, possible_path))
     }
 
     fn create_valid_link(
@@ -619,13 +838,7 @@ impl super::TerminalView {
             absolute_path,
             line_and_column_num,
         };
-
-        match possible_path {
-            WithinModel::AltScreen(_) => WithinModel::AltScreen(inner_link),
-            WithinModel::BlockList(inner) => {
-                WithinModel::BlockList(WithinBlock::new(inner_link, inner.block_index, inner.grid))
-            }
-        }
+        wrap_within_model(inner_link, possible_path)
     }
 
     fn handle_file_link_completed(
