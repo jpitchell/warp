@@ -13,7 +13,7 @@ use warp_cli::agent::Harness;
 use warp_terminal::model::escape_sequences::{BRACKETED_PASTE_END, BRACKETED_PASTE_START, C0};
 use warpui::notification::UserNotification;
 use warpui::platform::WindowStyle;
-use warpui::{App, Presenter, ReadModel, WindowInvalidation};
+use warpui::{App, EntityId, Presenter, ReadModel, WindowInvalidation};
 
 use super::*;
 use crate::ai::agent::conversation::ConversationStatus;
@@ -446,6 +446,94 @@ fn submit_cli_agent_rich_input_restores_unlocked_input_config() {
                 }
             );
             assert!(input.editor().as_ref(ctx).buffer_text(ctx).is_empty());
+        });
+    })
+}
+
+/// Verifies the gating predicate that re-enables alt-screen file-path link detection
+/// for CLI agent TUIs (Claude Code, Codex, etc.). Detection should turn on only when
+/// the feature flag is enabled, the user setting is on, AND a CLI agent session is
+/// tracked for the view -- so real editors (vim/nano) and opt-out users are unaffected.
+#[cfg(feature = "local_fs")]
+#[test]
+fn alt_screen_file_links_gated_by_flag_setting_and_cli_agent_session() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+
+        fn set_session(app: &mut App, view_id: EntityId, agent: CLIAgent) {
+            CLIAgentSessionsModel::handle(app).update(app, |sessions, ctx| {
+                sessions.set_session(
+                    view_id,
+                    CLIAgentSession {
+                        agent,
+                        status: CLIAgentSessionStatus::InProgress,
+                        session_context: CLIAgentSessionContext::default(),
+                        input_state: CLIAgentInputState::Closed,
+                        should_auto_toggle_input: false,
+                        listener: None,
+                        remote_host: None,
+                        plugin_version: None,
+                        draft_text: None,
+                        custom_command_prefix: None,
+                    },
+                    ctx,
+                );
+            });
+        }
+
+        // Flag enabled + setting on (default) + NO session -> not detected (vim/nano case).
+        terminal.update(&mut app, |view, ctx| {
+            let _flag = FeatureFlag::CliAgentFileLinks.override_enabled(true);
+            assert!(
+                !view.should_detect_cli_agent_file_links(ctx),
+                "should not detect without a tracked CLI agent session"
+            );
+        });
+
+        // Flag enabled + setting on + Claude session -> detected.
+        let view_id = terminal.read(&app, |view, _| view.view_id);
+        set_session(&mut app, view_id, CLIAgent::Claude);
+        terminal.update(&mut app, |view, ctx| {
+            let _flag = FeatureFlag::CliAgentFileLinks.override_enabled(true);
+            assert!(
+                view.should_detect_cli_agent_file_links(ctx),
+                "should detect with flag on, setting on, and a Claude session"
+            );
+        });
+
+        // Flag DISABLED + session present -> not detected (rollout gate).
+        terminal.update(&mut app, |view, ctx| {
+            let _flag = FeatureFlag::CliAgentFileLinks.override_enabled(false);
+            assert!(
+                !view.should_detect_cli_agent_file_links(ctx),
+                "should not detect when the feature flag is disabled"
+            );
+        });
+
+        // Flag enabled + setting OFF + session present -> not detected (user opt-out).
+        crate::terminal::general_settings::GeneralSettings::handle(&app).update(&mut app, |settings, ctx| {
+            let _ = settings.cli_agent_file_links.set_value(false, ctx);
+        });
+        terminal.update(&mut app, |view, ctx| {
+            let _flag = FeatureFlag::CliAgentFileLinks.override_enabled(true);
+            assert!(
+                !view.should_detect_cli_agent_file_links(ctx),
+                "should not detect when the user setting is turned off"
+            );
+        });
+
+        // Setting back on + Codex session -> detected (multi-agent coverage).
+        crate::terminal::general_settings::GeneralSettings::handle(&app).update(&mut app, |settings, ctx| {
+            let _ = settings.cli_agent_file_links.set_value(true, ctx);
+        });
+        set_session(&mut app, view_id, CLIAgent::Codex);
+        terminal.update(&mut app, |view, ctx| {
+            let _flag = FeatureFlag::CliAgentFileLinks.override_enabled(true);
+            assert!(
+                view.should_detect_cli_agent_file_links(ctx),
+                "should detect with a Codex session too"
+            );
         });
     })
 }

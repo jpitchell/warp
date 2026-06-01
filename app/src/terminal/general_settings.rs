@@ -70,6 +70,15 @@ define_settings_group!(GeneralSettings, settings: [
         toml_path: "general.link_tooltip",
         description: "Whether to show a tooltip when hovering over links.",
     },
+    cli_agent_file_links: CliAgentFileLinks {
+        type: bool,
+        default: true,
+        supported_platforms: SupportedPlatforms::ALL,
+        sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
+        private: false,
+        toml_path: "general.cli_agent_file_links",
+        description: "Whether to detect clickable file paths in CLI agent output (Claude Code, Codex, etc.).",
+    },
     welcome_tips_features_used: WelcomeTipsFeaturesUsed {
         type: HashSet<Tip>,
         default: HashSet::new(),

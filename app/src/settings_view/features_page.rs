@@ -80,8 +80,8 @@ use crate::terminal::alt_screen_reporting::{
     AltScreenReporting, FocusReportingEnabled, MouseReportingEnabled, ScrollReportingEnabled,
 };
 use crate::terminal::general_settings::{
-    AutoOpenCodeReviewPaneOnFirstAgentChange, GeneralSettings, LinkTooltip, LoginItem,
-    QuitOnLastWindowClosed, RestoreSession, ShowWarningBeforeQuitting,
+    AutoOpenCodeReviewPaneOnFirstAgentChange, CliAgentFileLinks, GeneralSettings, LinkTooltip,
+    LoginItem, QuitOnLastWindowClosed, RestoreSession, ShowWarningBeforeQuitting,
 };
 use crate::terminal::input::OPEN_COMPLETIONS_KEYBINDING_NAME;
 use crate::terminal::keys_settings::{
@@ -731,6 +731,7 @@ pub enum FeaturesPageAction {
     ToggleSshWrapper,
     ToggleSnackbar,
     ToggleLinkTooltip,
+    ToggleCliAgentFileLinks,
     ToggleCompletionsOpenWhileTyping,
     ToggleCommandCorrections,
     ToggleErrorUnderlining,
@@ -928,6 +929,10 @@ impl FeaturesPageAction {
             Self::ToggleLinkTooltip => TelemetryEvent::FeaturesPageAction {
                 action: "ToggleLinkTooltip".to_string(),
                 value: to_string(*GeneralSettings::as_ref(ctx).link_tooltip),
+            },
+            Self::ToggleCliAgentFileLinks => TelemetryEvent::FeaturesPageAction {
+                action: "ToggleCliAgentFileLinks".to_string(),
+                value: to_string(*GeneralSettings::as_ref(ctx).cli_agent_file_links),
             },
             Self::ToggleCompletionsOpenWhileTyping => TelemetryEvent::FeaturesPageAction {
                 action: "ToggleCompletionsOpenWhileTyping".to_string(),
@@ -1844,6 +1849,11 @@ impl TypedActionView for FeaturesPageView {
                     report_if_error!(settings.link_tooltip.toggle_and_save_value(ctx));
                 });
             }
+            ToggleCliAgentFileLinks => {
+                GeneralSettings::handle(ctx).update(ctx, |settings, ctx| {
+                    report_if_error!(settings.cli_agent_file_links.toggle_and_save_value(ctx));
+                });
+            }
             ToggleShowWarningBeforeQuitting => {
                 GeneralSettings::handle(ctx).update(ctx, |warning_settings, ctx| {
                     report_if_error!(warning_settings
@@ -2648,6 +2658,9 @@ impl FeaturesPageView {
 
         general_widgets.push(Box::new(SnackbarHeaderWidget::default()));
         general_widgets.push(Box::new(LinkTooltipWidget::default()));
+        if FeatureFlag::CliAgentFileLinks.is_enabled() {
+            general_widgets.push(Box::new(CliAgentFileLinksWidget::default()));
+        }
 
         #[cfg(feature = "local_fs")]
         {
@@ -4660,6 +4673,52 @@ impl SettingsWidget for LinkTooltipWidget {
                 .build()
                 .on_click(move |ctx, _, _| {
                     ctx.dispatch_typed_action(FeaturesPageAction::ToggleLinkTooltip);
+                })
+                .finish(),
+            None,
+        )
+    }
+}
+
+#[derive(Default)]
+struct CliAgentFileLinksWidget {
+    switch_state: SwitchStateHandle,
+}
+
+impl SettingsWidget for CliAgentFileLinksWidget {
+    type View = FeaturesPageView;
+
+    fn search_terms(&self) -> &str {
+        "agent cli file path link claude codex open"
+    }
+
+    fn render(
+        &self,
+        view: &Self::View,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        let ui_builder = appearance.ui_builder();
+        render_body_item::<FeaturesPageAction>(
+            "Detect file paths in CLI agent output".into(),
+            None,
+            LocalOnlyIconState::for_setting(
+                CliAgentFileLinks::storage_key(),
+                CliAgentFileLinks::sync_to_cloud(),
+                &mut view
+                    .button_mouse_states
+                    .local_only_icon_tooltip_states
+                    .borrow_mut(),
+                app,
+            ),
+            ToggleState::Enabled,
+            appearance,
+            ui_builder
+                .switch(self.switch_state.clone())
+                .check(*GeneralSettings::as_ref(app).cli_agent_file_links)
+                .build()
+                .on_click(move |ctx, _, _| {
+                    ctx.dispatch_typed_action(FeaturesPageAction::ToggleCliAgentFileLinks);
                 })
                 .finish(),
             None,

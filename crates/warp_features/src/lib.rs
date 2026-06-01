@@ -886,6 +886,11 @@ pub enum FeatureFlag {
 
     /// Gates the Grouped Tabs feature.
     GroupedTabs,
+
+    /// Enables file-path link detection (hover tooltip + Cmd+Click to open in Warp) inside
+    /// CLI agent TUIs like Claude Code and Codex, which run on the alternate screen and would
+    /// otherwise be treated as vim/nano-style editors where file links are suppressed.
+    CliAgentFileLinks,
 }
 
 static FLAG_STATES: [AtomicBool; cardinality::<FeatureFlag>()] =
@@ -953,6 +958,7 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::GroupedTabs,
     FeatureFlag::AsyncFind,
     FeatureFlag::OrchestrationViewerStreamer,
+    FeatureFlag::CliAgentFileLinks,
 ];
 
 /// Features enabled for feature preview build users (e.g.: Friends of Warp).
