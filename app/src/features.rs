@@ -493,6 +493,8 @@ fn enabled_features() -> HashSet<FeatureFlag> {
         FeatureFlag::RemoteCodeReview,
         #[cfg(feature = "custom_inference_endpoints")]
         FeatureFlag::CustomInferenceEndpoints,
+        #[cfg(feature = "cli_agent_file_links")]
+        FeatureFlag::CliAgentFileLinks,
     ]);
 
     flags

@@ -23,6 +23,9 @@ cfg_if::cfg_if! {
         use std::path::PathBuf;
         use warp_util::path::CleanPathResult;
         use warp_util::path::LineAndColumnArg;
+        use warpui::{AppContext, SingletonEntity};
+        use crate::features::FeatureFlag;
+        use crate::terminal::general_settings::GeneralSettings;
     }
 }
 
@@ -450,8 +453,13 @@ impl super::TerminalView {
 
         match pwd_to_scan_for {
             // Check if we are hovering on any file path. Don't scan for file path
-            // if user is hovering from an editor like vim or nano.
-            Some(path) if matches!(from_editor, TerminalEditor::No) => {
+            // if user is hovering from an editor like vim or nano -- unless a CLI
+            // agent TUI (Claude Code, Codex, etc.) is running, which we still want
+            // to linkify even though it enables SGR mouse reporting like an editor.
+            Some(path)
+                if matches!(from_editor, TerminalEditor::No)
+                    || self.should_detect_cli_agent_file_links(ctx) =>
+            {
                 let possible_paths = self.model.lock().possible_file_paths_at_point(position);
                 let max_columns = self.size_info.columns;
                 let shell_launch_data = self
@@ -489,6 +497,17 @@ impl super::TerminalView {
             }
             _ => (),
         };
+    }
+
+    /// True when file-path links should be detected for an on-screen CLI agent TUI
+    /// (Claude, Codex, etc.). Re-enables detection on the alt screen even though agent
+    /// TUIs enable SGR mouse reporting (which we otherwise treat as a vim/nano-style
+    /// editor). Gated by both the rollout feature flag and the user setting so it can
+    /// be staged and individually disabled.
+    pub(crate) fn should_detect_cli_agent_file_links(&self, ctx: &AppContext) -> bool {
+        FeatureFlag::CliAgentFileLinks.is_enabled()
+            && *GeneralSettings::as_ref(ctx).cli_agent_file_links
+            && self.has_active_cli_agent_session(ctx)
     }
 
     fn compute_valid_paths(
