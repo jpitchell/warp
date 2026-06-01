@@ -1,0 +1,141 @@
+# Self-contained macOS release workflow for forks.
+#
+# Unlike the upstream `create_release.yml` / `cut_new_releases.yml` pipeline
+# (which is wired to Warp's private infra: custom runners, Apple Developer ID
+# signing, notarization, GCS, Sentry, and cross-repo dispatch), this workflow
+# runs entirely on GitHub-hosted runners and needs NO secrets beyond the
+# built-in GITHUB_TOKEN.
+#
+# It builds the open-source `oss` channel of Warp (binary `warp-oss`, app
+# `WarpOss`, no Sentry), self-signs the app with ad-hoc signing (no Apple
+# certs required), packages a .dmg per architecture, and attaches them to a
+# GitHub Release on this fork.
+#
+# Trigger: push a version tag, e.g.
+#     git tag v0.1.0 && git push origin v0.1.0
+# You can also run it manually from the Actions tab (workflow_dispatch); manual
+# runs build the artifacts and upload them to the workflow run but do not create
+# a published GitHub Release unless a tag is provided.
+#
+# NOTE: the produced .dmg is ad-hoc signed and NOT notarized. On first launch,
+# macOS Gatekeeper will require right-click > Open (or
+# `xattr -dr com.apple.quarantine /Applications/WarpOss.app`).
+
+name: Fork Release (macOS)
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Optional version tag to stamp into the build (e.g. v0.1.0). Leave blank to build without a published release."
+        required: false
+        type: string
+
+# Needed for softprops/action-gh-release to create releases and upload assets.
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # The open-source release channel. Drops Sentry and uses the `warp-oss`
+  # binary / `WarpOss` app name (see script/macos/bundle).
+  CHANNEL: oss
+
+jobs:
+  build_macos:
+    name: Build macOS (${{ matrix.dmg_name_suffix }})
+    runs-on: macos-14
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            dmg_name_suffix: arm64
+          - arch: x86_64
+            dmg_name_suffix: x86_64
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      # Reuse the upstream environment setup. It installs protoc, Node/Corepack,
+      # the Rust toolchain cache, and release deps (cargo-about for license
+      # generation). The private warp-channel-config SSH step inside this action
+      # only runs in warpdotdev/warp-internal, so on a fork it is a safe no-op.
+      - uses: ./.github/actions/prepare_environment
+        with:
+          target_os: macos
+          is_self_hosted: false
+          install_release_deps: true
+
+      - name: Ensure rust target is installed
+        run: rustup target add ${{ matrix.arch }}-apple-darwin
+        shell: bash
+
+      - name: Setup Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version: stable
+
+      - name: Install cargo-bundle
+        run: script/install_cargo_bundle
+
+      - name: Install create-dmg
+        run: brew install create-dmg
+
+      - name: Resolve release tag
+        id: tag
+        # INPUT_TAG is passed via env (not interpolated into the script body) to
+        # avoid shell injection from the workflow_dispatch input.
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          # On a tag push, GITHUB_REF_NAME is the tag (e.g. v0.1.0). For manual
+          # runs, use the optional `tag` input if provided.
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          elif [[ -n "$INPUT_TAG" ]]; then
+            echo "value=$INPUT_TAG" >> "$GITHUB_OUTPUT"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=v0.0.0-dev" >> "$GITHUB_OUTPUT"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+        shell: bash
+
+      - name: Build ${{ matrix.arch }} bundle (oss channel, self-signed)
+        id: bundle
+        run: |
+          script/bundle \
+            --channel "$CHANNEL" \
+            --selfsign \
+            --arch ${{ matrix.arch }} \
+            --dmg-name-suffix "${{ matrix.dmg_name_suffix }}"
+        shell: bash
+        env:
+          GIT_RELEASE_TAG: ${{ steps.tag.outputs.value }}
+
+      - name: Upload DMG as workflow artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: WarpOss-${{ matrix.dmg_name_suffix }}
+          path: ${{ steps.bundle.outputs.dmg_path }}
+
+      - name: Attach DMG to GitHub Release
+        if: ${{ steps.tag.outputs.publish == 'true' }}
+        uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2.2.2
+        with:
+          tag_name: ${{ steps.tag.outputs.value }}
+          name: Warp (OSS) ${{ steps.tag.outputs.value }}
+          body: |
+            Unsigned, un-notarized open-source (`oss` channel) build of Warp for macOS.
+
+            **First launch:** macOS Gatekeeper will block this build. Right-click the app and choose **Open**, or run:
+            `xattr -dr com.apple.quarantine /Applications/WarpOss.app`
+          draft: false
+          prerelease: true
+          files: ${{ steps.bundle.outputs.dmg_path }}
+          token: ${{ secrets.GITHUB_TOKEN }}
