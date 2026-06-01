@@ -685,6 +685,8 @@ pub enum Event {
     OpenEnvironmentManagementPane,
     OpenFilesPalette {
         source: PaletteSource,
+        /// When set, opens the Files palette pre-filled with this query.
+        initial_query: Option<String>,
     },
     ToggleLeftPanel {
         target_view: LeftPanelTargetView,

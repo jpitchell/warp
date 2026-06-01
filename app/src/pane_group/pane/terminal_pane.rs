@@ -1375,9 +1375,13 @@ fn handle_terminal_view_event(
             Event::OpenMCPSettingsPage { page } => {
                 ctx.emit(pane_group::Event::OpenMCPSettingsPage { page: *page });
             }
-            Event::OpenFilesPalette { source } => {
-                ctx.emit(pane_group::Event::OpenFilesPalette { source: *source })
-            }
+            Event::OpenFilesPalette {
+                source,
+                initial_query,
+            } => ctx.emit(pane_group::Event::OpenFilesPalette {
+                source: *source,
+                initial_query: initial_query.clone(),
+            }),
             Event::OpenAddRulePane => {
                 ctx.emit(crate::pane_group::Event::OpenAddRulePane);
             }
