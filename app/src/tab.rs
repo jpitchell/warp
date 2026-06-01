@@ -198,7 +198,7 @@ impl TabData {
         let mut menu_items = vec![];
 
         for section_items in [
-            Self::tab_group_menu_items(),
+            self.tab_group_menu_items(index),
             self.session_sharing_menu_items(index, ctx),
             self.copy_metadata_menu_items(pane_name_target, ctx),
             self.modify_tab_menu_items(index, tabs_len, pane_name_target, ctx),
@@ -534,15 +534,24 @@ impl TabData {
             .into_item()]
     }
 
-    /// Returns the tab-group related entries, TODO(johnturcoo) add group actions.
-    fn tab_group_menu_items() -> Vec<MenuItem<WorkspaceAction>> {
+    /// Returns the tab-group entries for the top-level right-click menu:
+    /// `New group with tab` (always available when the FF is on) and
+    /// `Remove from group` (only when the tab is currently in a group).
+    fn tab_group_menu_items(&self, index: usize) -> Vec<MenuItem<WorkspaceAction>> {
         if !FeatureFlag::GroupedTabs.is_enabled() {
             return vec![];
         }
-        vec![
-            MenuItemFields::new("New group with tab").into_item(),
-            MenuItemFields::new_submenu("Move to group").into_item(),
-        ]
+        let mut menu_items = vec![MenuItemFields::new("New group with tab")
+            .with_on_select_action(WorkspaceAction::NewTabGroupFromTab(index))
+            .into_item()];
+        if self.group_id.is_some() {
+            menu_items.push(
+                MenuItemFields::new("Remove from group")
+                    .with_on_select_action(WorkspaceAction::RemoveTabFromGroup(index))
+                    .into_item(),
+            );
+        }
+        menu_items
     }
 
     fn color_option_menu_items(
