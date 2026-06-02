@@ -33,6 +33,7 @@ mod download_method;
 mod drive;
 #[cfg(windows)]
 mod dynamic_libraries;
+mod edit_wait;
 mod env_vars;
 mod experiments;
 mod external_secrets;
