@@ -14511,6 +14511,7 @@ dependencies = [
  "input_classifier",
  "inquire",
  "instant",
+ "interprocess",
  "inventory",
  "ipc",
  "is_executable",
