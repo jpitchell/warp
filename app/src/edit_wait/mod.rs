@@ -73,6 +73,48 @@ pub fn build_wait_url(
     url
 }
 
+/// True if `addr` matches the exact shape this build's [`cli::fresh_addr`] would
+/// produce: on Unix a `warp-edit-wait-<digits>.sock` file directly inside the
+/// system temp dir; on Windows a `\\.\pipe\warp-edit-wait-<digits>` pipe.
+///
+/// The `wait` back-channel address arrives from an untrusted source — a
+/// `warplocal://action/open_file_editor?...&wait=<addr>` URL can be triggered by
+/// any party that can hand Warp a custom-scheme link. Without this check the app
+/// would `connect()` to an attacker-chosen local socket/pipe and write to it (a
+/// local SSRF primitive). Restricting the target to our own naming pattern in the
+/// temp dir removes the arbitrary-path capability; legitimate `warp --wait`
+/// callers always produce a matching address.
+pub fn is_trusted_wait_addr(addr: &str) -> bool {
+    fn is_wait_token(s: &str) -> bool {
+        !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+    }
+
+    #[cfg(unix)]
+    {
+        let path = std::path::Path::new(addr);
+        let in_temp_dir = path.parent() == Some(std::env::temp_dir().as_path());
+        let name_ok = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_prefix("warp-edit-wait-"))
+            .and_then(|n| n.strip_suffix(".sock"))
+            .map(is_wait_token)
+            .unwrap_or(false);
+        in_temp_dir && name_ok
+    }
+    #[cfg(windows)]
+    {
+        addr.strip_prefix(r"\\.\pipe\warp-edit-wait-")
+            .map(is_wait_token)
+            .unwrap_or(false)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = addr;
+        false
+    }
+}
+
 /// Canonicalize the raw `--wait` argument (after stripping any `:line:col`).
 ///
 /// Warp's editor only opens files that already exist, so a non-existent path is
@@ -391,6 +433,81 @@ mod tests {
         );
         assert!(!u.contains("&line="));
         assert!(!u.contains("&column="));
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn fresh_addr_is_trusted_but_arbitrary_paths_are_not() {
+        // Anything our own CLI generates must pass the allowlist...
+        let addr = cli::fresh_addr();
+        assert!(
+            is_trusted_wait_addr(&addr.0),
+            "fresh_addr produced an address the allowlist rejects: {}",
+            addr.0
+        );
+
+        // ...but arbitrary attacker-chosen targets must be rejected.
+        assert!(!is_trusted_wait_addr("/run/evil.sock"));
+        assert!(!is_trusted_wait_addr("/etc/passwd"));
+        assert!(!is_trusted_wait_addr(""));
+        #[cfg(unix)]
+        {
+            let outside = "/tmp/warp-edit-wait-1.sock"; // right name, wrong dir on macOS
+            let in_tmp = std::env::temp_dir().join("warp-edit-wait-not-numeric.sock");
+            // Non-numeric token is rejected even inside the temp dir.
+            assert!(!is_trusted_wait_addr(&in_tmp.to_string_lossy()));
+            // On platforms where temp_dir() isn't /tmp, a /tmp path is rejected.
+            if std::env::temp_dir() != std::path::Path::new("/tmp") {
+                assert!(!is_trusted_wait_addr(outside));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_block_until_closed_releases_on_signal() {
+        use std::io::Write as _;
+        use std::time::{Duration, Instant};
+
+        let addr = cli::fresh_addr();
+        let listener = cli::bind(&addr).unwrap();
+
+        let addr2 = addr.clone();
+        let connector = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            let mut s =
+                interprocess::local_socket::LocalSocketStream::connect(addr2.0.as_str()).unwrap();
+            let _ = s.write_all(&[super::registry::STATUS_CLOSED_OK]);
+        });
+
+        let start = Instant::now();
+        cli::block_until_closed(listener, &addr, Duration::from_secs(30));
+        let elapsed = start.elapsed();
+        connector.join().unwrap();
+
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "should release promptly after the app signals, took {elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_block_until_closed_times_out() {
+        use std::time::{Duration, Instant};
+
+        let addr = cli::fresh_addr();
+        let listener = cli::bind(&addr).unwrap();
+
+        let start = Instant::now();
+        cli::block_until_closed(listener, &addr, Duration::from_millis(800));
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed >= Duration::from_millis(700),
+            "should block until the timeout elapses, took {elapsed:?}"
+        );
+        assert!(elapsed < Duration::from_secs(10));
     }
 
     #[cfg(unix)]

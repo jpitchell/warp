@@ -352,10 +352,15 @@ fn test_action_open_file_editor_parse_with_path_only() {
 }
 
 #[test]
-fn test_action_open_file_editor_parse_with_wait_addr() {
+fn test_action_open_file_editor_parse_with_trusted_wait_addr() {
     let (path_param, expected_path) = open_file_editor_test_path("test.rs");
+    // A well-formed back-channel address (temp dir + our naming pattern) is kept.
+    let wait_addr = std::env::temp_dir().join("warp-edit-wait-12345.sock");
+    let wait_str = wait_addr.to_string_lossy().into_owned();
+    let wait_encoded =
+        url::form_urlencoded::byte_serialize(wait_str.as_bytes()).collect::<String>();
     let url = Url::parse(&format!(
-        "{}://action/open_file_editor?path={path_param}&wait=%2Ftmp%2Fwait.sock",
+        "{}://action/open_file_editor?path={path_param}&wait={wait_encoded}",
         ChannelState::url_scheme()
     ))
     .unwrap();
@@ -367,10 +372,31 @@ fn test_action_open_file_editor_parse_with_wait_addr() {
         } => {
             assert_eq!(path, expected_path);
             assert_eq!(line_col, None);
-            assert_eq!(
-                wait,
-                Some(crate::edit_wait::WaitAddr("/tmp/wait.sock".to_string()))
-            );
+            assert_eq!(wait, Some(crate::edit_wait::WaitAddr(wait_str)));
+        }
+        _ => panic!("unexpected action: {action:?}"),
+    }
+}
+
+#[test]
+fn test_action_open_file_editor_parse_rejects_untrusted_wait_addr() {
+    let (path_param, expected_path) = open_file_editor_test_path("test.rs");
+    // An arbitrary socket path (outside our naming pattern) must be dropped, so
+    // the app never connects to an attacker-chosen local socket.
+    let url = Url::parse(&format!(
+        "{}://action/open_file_editor?path={path_param}&wait=%2Frun%2Fevil.sock",
+        ChannelState::url_scheme()
+    ))
+    .unwrap();
+
+    let action = Action::parse(&url).unwrap();
+    match action {
+        Action::OpenFileEditor {
+            path, line_col, wait,
+        } => {
+            assert_eq!(path, expected_path);
+            assert_eq!(line_col, None);
+            assert_eq!(wait, None);
         }
         _ => panic!("unexpected action: {action:?}"),
     }

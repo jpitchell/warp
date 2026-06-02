@@ -845,10 +845,23 @@ fn parse_open_file_editor_url(
     );
 
     // `wait` is the back-channel address for `warp --wait` external-editor mode.
-    let wait = url
+    // It arrives from an untrusted URL, so only accept addresses matching the
+    // exact shape our own CLI generates — otherwise the app could be coerced into
+    // connecting to an arbitrary local socket/pipe.
+    let wait = match url
         .query_pairs()
         .find(|(k, _)| k == "wait")
-        .map(|(_, v)| crate::edit_wait::WaitAddr(v.into_owned()));
+        .map(|(_, v)| v.into_owned())
+    {
+        Some(addr) if crate::edit_wait::is_trusted_wait_addr(&addr) => {
+            Some(crate::edit_wait::WaitAddr(addr))
+        }
+        Some(addr) => {
+            log::warn!("ignoring untrusted open_file_editor `wait` address: {addr}");
+            None
+        }
+        None => None,
+    };
 
     Ok((
         path,
