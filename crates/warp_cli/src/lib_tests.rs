@@ -32,6 +32,21 @@ fn restore_env_var(name: &str, previous: Option<OsString>) {
 }
 
 #[test]
+fn parses_wait_flag_with_path() {
+    let args = Args::try_parse_from(["warp", "--wait", "/tmp/foo.txt"]).unwrap();
+    assert_eq!(
+        args.wait_path(),
+        Some(std::path::Path::new("/tmp/foo.txt"))
+    );
+}
+
+#[test]
+fn wait_flag_absent_by_default() {
+    let args = Args::try_parse_from(["warp"]).unwrap();
+    assert!(args.wait_path().is_none());
+}
+
+#[test]
 fn agent_run_accepts_model() {
     let args = Args::try_parse_from([
         "warp", "agent", "run", "--prompt", "hello", "--model", "gpt-4o",
