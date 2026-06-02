@@ -819,7 +819,13 @@ fn parse_positive_usize_query_param(url: &Url, name: &str) -> Result<Option<usiz
     Ok(Some(value))
 }
 
-fn parse_open_file_editor_url(url: &Url) -> Result<(PathBuf, Option<LineAndColumnArg>)> {
+fn parse_open_file_editor_url(
+    url: &Url,
+) -> Result<(
+    PathBuf,
+    Option<LineAndColumnArg>,
+    Option<crate::edit_wait::WaitAddr>,
+)> {
     let raw_path = url
         .query_pairs()
         .find(|(k, _)| k == "path")
@@ -838,12 +844,19 @@ fn parse_open_file_editor_url(url: &Url) -> Result<(PathBuf, Option<LineAndColum
         "`column` requires `line` for open_file_editor action"
     );
 
+    // `wait` is the back-channel address for `warp --wait` external-editor mode.
+    let wait = url
+        .query_pairs()
+        .find(|(k, _)| k == "wait")
+        .map(|(_, v)| crate::edit_wait::WaitAddr(v.into_owned()));
+
     Ok((
         path,
         line.map(|line_num| LineAndColumnArg {
             line_num,
             column_num: column,
         }),
+        wait,
     ))
 }
 
@@ -867,6 +880,7 @@ enum Action {
     OpenFileEditor {
         path: PathBuf,
         line_col: Option<LineAndColumnArg>,
+        wait: Option<crate::edit_wait::WaitAddr>,
     },
     Docker,
     OpenRepo,
@@ -888,8 +902,12 @@ impl Action {
             "/new_tab" => Ok(Self::NewTab),
             "/new_window" => Ok(Self::NewWindow),
             "/open_file_editor" => {
-                let (path, line_col) = parse_open_file_editor_url(url)?;
-                Ok(Self::OpenFileEditor { path, line_col })
+                let (path, line_col, wait) = parse_open_file_editor_url(url)?;
+                Ok(Self::OpenFileEditor {
+                    path,
+                    line_col,
+                    wait,
+                })
             }
             "/docker/open_subshell" => Ok(Self::Docker),
             "/open-repo" => Ok(Self::OpenRepo),
@@ -931,12 +949,16 @@ impl Action {
                 };
                 open_file(window_id, path, ctx);
             }
-            Self::OpenFileEditor { path, line_col } => {
+            Self::OpenFileEditor {
+                path,
+                line_col,
+                wait,
+            } => {
                 #[cfg(feature = "local_fs")]
-                open_file_editor(primary_window_id, path.clone(), *line_col, ctx);
+                open_file_editor(primary_window_id, path.clone(), *line_col, wait.clone(), ctx);
                 #[cfg(not(feature = "local_fs"))]
                 {
-                    let _ = (path, line_col);
+                    let _ = (path, line_col, wait);
                     log::warn!("open_file_editor action requires local_fs support");
                 }
             }
@@ -1371,22 +1393,43 @@ fn open_file_editor(
     primary_window_id: Option<WindowId>,
     path: PathBuf,
     line_col: Option<LineAndColumnArg>,
+    wait: Option<crate::edit_wait::WaitAddr>,
     ctx: &mut AppContext,
 ) {
     #[cfg(feature = "local_fs")]
     {
         use crate::code::editor_management::CodeSource;
+        use crate::edit_wait::registry::{EditWaitRegistry, STATUS_NEVER_OPENED};
         use crate::root_view::{open_new_with_workspace_source, NewWorkspaceSource};
         use crate::util::file::external_editor::EditorSettings;
-        use crate::util::openable_file_type::resolve_file_target_to_open_in_warp;
+        use crate::util::openable_file_type::{resolve_file_target_to_open_in_warp, FileTarget};
 
         if !can_open_file_editor_path(&path) {
             log::warn!("open_file_editor action rejected non-openable path: {path:?}");
+            // Unblock any `warp --wait` caller immediately so it doesn't hang.
+            if let Some(addr) = &wait {
+                EditWaitRegistry::signal_addr(addr, STATUS_NEVER_OPENED);
+            }
             return;
         }
 
         let editor_settings = EditorSettings::as_ref(ctx);
-        let target = resolve_file_target_to_open_in_warp(&path, editor_settings, None);
+        // For `--wait` we always use the in-app code editor (never the markdown
+        // notebook or an external editor), because only a closeable editor tab
+        // gives us a detectable close signal to release the waiting CLI.
+        let target = if wait.is_some() {
+            FileTarget::CodeEditor(*editor_settings.open_file_layout)
+        } else {
+            resolve_file_target_to_open_in_warp(&path, editor_settings, None)
+        };
+
+        // Register the waiter BEFORE opening, keyed by canonical path, so the
+        // tab-close watcher can find and notify it.
+        if let Some(addr) = wait {
+            EditWaitRegistry::handle(ctx).update(ctx, |reg, _ctx| {
+                reg.register(&path, addr);
+            });
+        }
 
         let window_id = if let Some((wid, _)) = primary_window_id.and_then(|window_id| {
             ctx.root_view_id(window_id)

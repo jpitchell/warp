@@ -145,6 +145,18 @@ impl PaneContent for CodePane {
                         }
                     }
                 }
+                CodeViewEvent::FileClosed { location } => {
+                    // Release any `warp --wait` process blocked on this file.
+                    #[cfg(feature = "local_fs")]
+                    if let Some(path) = location.to_local_path().map(std::path::Path::to_path_buf) {
+                        use crate::edit_wait::registry::EditWaitRegistry;
+                        EditWaitRegistry::handle(ctx).update(ctx, |reg, _ctx| {
+                            reg.notify_closed(&path);
+                        });
+                    }
+                    #[cfg(not(feature = "local_fs"))]
+                    let _ = location;
+                }
                 CodeViewEvent::RunTabConfigSkill { path } => {
                     ctx.emit(crate::pane_group::Event::RunTabConfigSkill { path: path.clone() });
                 }

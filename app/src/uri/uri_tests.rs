@@ -341,9 +341,36 @@ fn test_action_open_file_editor_parse_with_path_only() {
 
     let action = Action::parse(&url).unwrap();
     match action {
-        Action::OpenFileEditor { path, line_col } => {
+        Action::OpenFileEditor {
+            path, line_col, ..
+        } => {
             assert_eq!(path, expected_path);
             assert_eq!(line_col, None);
+        }
+        _ => panic!("unexpected action: {action:?}"),
+    }
+}
+
+#[test]
+fn test_action_open_file_editor_parse_with_wait_addr() {
+    let (path_param, expected_path) = open_file_editor_test_path("test.rs");
+    let url = Url::parse(&format!(
+        "{}://action/open_file_editor?path={path_param}&wait=%2Ftmp%2Fwait.sock",
+        ChannelState::url_scheme()
+    ))
+    .unwrap();
+
+    let action = Action::parse(&url).unwrap();
+    match action {
+        Action::OpenFileEditor {
+            path, line_col, wait,
+        } => {
+            assert_eq!(path, expected_path);
+            assert_eq!(line_col, None);
+            assert_eq!(
+                wait,
+                Some(crate::edit_wait::WaitAddr("/tmp/wait.sock".to_string()))
+            );
         }
         _ => panic!("unexpected action: {action:?}"),
     }
@@ -360,7 +387,9 @@ fn test_action_open_file_editor_parse_with_line_only() {
 
     let action = Action::parse(&url).unwrap();
     match action {
-        Action::OpenFileEditor { path, line_col } => {
+        Action::OpenFileEditor {
+            path, line_col, ..
+        } => {
             assert_eq!(path, expected_path);
             assert_eq!(
                 line_col,
@@ -385,7 +414,9 @@ fn test_action_open_file_editor_parse_with_line_and_column() {
 
     let action = Action::parse(&url).unwrap();
     match action {
-        Action::OpenFileEditor { path, line_col } => {
+        Action::OpenFileEditor {
+            path, line_col, ..
+        } => {
             assert_eq!(path, expected_path);
             assert_eq!(
                 line_col,
@@ -411,7 +442,9 @@ fn test_action_open_file_editor_parse_decodes_percent_encoded_path() {
 
     let action = Action::parse(&url).unwrap();
     match action {
-        Action::OpenFileEditor { path, line_col } => {
+        Action::OpenFileEditor {
+            path, line_col, ..
+        } => {
             assert_eq!(path, expected_path);
             assert_eq!(
                 line_col,
@@ -435,7 +468,9 @@ fn test_action_open_file_editor_parse_expands_home_dir() {
 
     let action = Action::parse(&url).unwrap();
     match action {
-        Action::OpenFileEditor { path, line_col } => {
+        Action::OpenFileEditor {
+            path, line_col, ..
+        } => {
             assert_eq!(
                 path,
                 PathBuf::from(shellexpand::tilde("~/tmp/test.rs").into_owned())

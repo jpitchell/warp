@@ -613,6 +613,14 @@ pub fn run() -> Result<()> {
         }
     }
 
+    // `--wait` external-editor mode (`EDITOR='warp --wait'`): forward an edit URI
+    // to a running (or freshly launched) Warp instance and block until the user
+    // closes that file's tab. This process never becomes the GUI.
+    #[cfg(not(target_family = "wasm"))]
+    if let Some(wait_path) = args.wait_path() {
+        return crate::edit_wait::run_wait_mode(&wait_path.to_string_lossy());
+    }
+
     if let Some(command) = args.command() {
         #[cfg(windows)]
         if command.prints_to_stdout() {
