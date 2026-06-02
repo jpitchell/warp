@@ -186,6 +186,13 @@ pub enum CodeViewEvent {
         location: LocalOrRemotePath,
         tab_index: usize,
     },
+    /// A specific file tab was removed from this CodeView. Fired for every
+    /// individual tab removal AND for whole-pane teardown (see
+    /// `cleanup_all_tabs`). Used by the `--wait` external-editor mode to detect
+    /// when the user has finished editing a file.
+    FileClosed {
+        location: LocalOrRemotePath,
+    },
     RunTabConfigSkill {
         path: PathBuf,
     },
@@ -1004,10 +1011,18 @@ impl CodeView {
     }
 
     pub fn cleanup_all_tabs(&mut self, ctx: &mut ViewContext<Self>) {
+        let closed_locations: Vec<LocalOrRemotePath> = self
+            .tab_group
+            .iter()
+            .filter_map(|t| t.location().cloned())
+            .collect();
         self.tab_group.clear();
         GlobalBufferModel::handle(ctx).update(ctx, |model, ctx| {
             model.remove_deallocated_buffers(ctx);
         });
+        for location in closed_locations {
+            ctx.emit(CodeViewEvent::FileClosed { location });
+        }
     }
 
     fn insert_selection_as_context(
@@ -1189,10 +1204,14 @@ impl CodeView {
     }
 
     fn remove_tab_data_index(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
+        let closed_location = self.tab_group.get(index).and_then(|t| t.location().cloned());
         self.tab_group.remove(index);
         GlobalBufferModel::handle(ctx).update(ctx, |model, ctx| {
             model.remove_deallocated_buffers(ctx);
         });
+        if let Some(location) = closed_location {
+            ctx.emit(CodeViewEvent::FileClosed { location });
+        }
         self.set_active_tab_index_after_remove(index, ctx);
     }
 
