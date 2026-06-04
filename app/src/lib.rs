@@ -1887,6 +1887,9 @@ pub(crate) fn initialize_app(
     ctx.add_singleton_model(|ctx| NotebookManager::new(notebooks, ctx));
     ctx.add_singleton_model(|_| CodeManager::default());
     ctx.add_singleton_model(|_| OpenedFilesModel::new());
+    // Tracks `warp --wait` callers so their editor tab closing can unblock them.
+    #[cfg(not(target_family = "wasm"))]
+    ctx.add_singleton_model(|_| crate::edit_wait::registry::EditWaitRegistry::default());
     ctx.add_singleton_model(NotebookKeybindings::new);
     ctx.add_singleton_model(TerminalKeybindings::new);
     ctx.add_singleton_model(|_| ActiveSession::default());
