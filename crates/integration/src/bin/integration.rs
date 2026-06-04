@@ -440,6 +440,9 @@ fn register_tests() -> HashMap<&'static str, BoxedBuilderFn> {
     register_test!(test_rule_pane_opening);
     register_test!(test_undo_close_stack_timeout_cleanup);
 
+    // Edit-wait (`warp --wait`) back-channel test
+    register_test!(test_edit_wait_tab_close_signals_back_channel);
+
     // File tree tests
     register_test!(test_file_tree_opens_files_in_warp);
     register_test!(test_file_tree_open_in_new_pane);
