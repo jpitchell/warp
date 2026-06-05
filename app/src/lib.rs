@@ -33,6 +33,7 @@ mod download_method;
 mod drive;
 #[cfg(windows)]
 mod dynamic_libraries;
+mod edit_wait;
 mod env_vars;
 mod experiments;
 mod external_secrets;
@@ -610,6 +611,14 @@ pub fn run() -> Result<()> {
                 eprintln!("Error: Invalid session sharing server URL: {e:#}");
             }
         }
+    }
+
+    // `--wait` external-editor mode (`EDITOR='warp --wait'`): forward an edit URI
+    // to a running (or freshly launched) Warp instance and block until the user
+    // closes that file's tab. This process never becomes the GUI.
+    #[cfg(not(target_family = "wasm"))]
+    if let Some(wait_path) = args.wait_path() {
+        return crate::edit_wait::run_wait_mode(&wait_path.to_string_lossy());
     }
 
     if let Some(command) = args.command() {
@@ -1878,6 +1887,9 @@ pub(crate) fn initialize_app(
     ctx.add_singleton_model(|ctx| NotebookManager::new(notebooks, ctx));
     ctx.add_singleton_model(|_| CodeManager::default());
     ctx.add_singleton_model(|_| OpenedFilesModel::new());
+    // Tracks `warp --wait` callers so their editor tab closing can unblock them.
+    #[cfg(not(target_family = "wasm"))]
+    ctx.add_singleton_model(|_| crate::edit_wait::registry::EditWaitRegistry::default());
     ctx.add_singleton_model(NotebookKeybindings::new);
     ctx.add_singleton_model(TerminalKeybindings::new);
     ctx.add_singleton_model(|_| ActiveSession::default());

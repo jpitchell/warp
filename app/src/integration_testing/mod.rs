@@ -13,6 +13,7 @@ pub mod codebase_context;
 pub mod command_palette;
 pub mod command_search;
 pub mod context_chips;
+pub mod edit_wait;
 pub mod find;
 pub mod goto_line;
 pub mod input;

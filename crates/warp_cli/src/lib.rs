@@ -166,6 +166,14 @@ pub struct AppArgs {
     #[clap(flatten)]
     pub parent: ParentOpts,
 
+    /// Open the given file in Warp's code editor and block until the user closes
+    /// that file's editor tab, then exit 0. Designed for use as
+    /// `EDITOR='warp --wait'` by git, Claude Code, etc.
+    ///
+    /// May include a trailing `:line` or `:line:column` suffix.
+    #[arg(long = "wait")]
+    pub wait: Option<std::path::PathBuf>,
+
     /// URLs to open in Warp.
     #[arg(hide = true)]
     pub urls: Vec<Url>,
@@ -397,6 +405,12 @@ impl Args {
     /// Extract the main Warp application args.
     pub fn into_app_args(self) -> AppArgs {
         self.args
+    }
+
+    /// The path passed to `--wait`, if any. Present when Warp is invoked as a
+    /// blocking external editor (`EDITOR='warp --wait'`).
+    pub fn wait_path(&self) -> Option<&Path> {
+        self.args.wait.as_deref()
     }
 
     /// Returns the global options.

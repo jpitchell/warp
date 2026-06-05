@@ -341,9 +341,62 @@ fn test_action_open_file_editor_parse_with_path_only() {
 
     let action = Action::parse(&url).unwrap();
     match action {
-        Action::OpenFileEditor { path, line_col } => {
+        Action::OpenFileEditor {
+            path, line_col, ..
+        } => {
             assert_eq!(path, expected_path);
             assert_eq!(line_col, None);
+        }
+        _ => panic!("unexpected action: {action:?}"),
+    }
+}
+
+#[test]
+fn test_action_open_file_editor_parse_with_trusted_wait_addr() {
+    let (path_param, expected_path) = open_file_editor_test_path("test.rs");
+    // A well-formed back-channel address (temp dir + our naming pattern) is kept.
+    let wait_addr = std::env::temp_dir().join("warp-edit-wait-12345.sock");
+    let wait_str = wait_addr.to_string_lossy().into_owned();
+    let wait_encoded =
+        url::form_urlencoded::byte_serialize(wait_str.as_bytes()).collect::<String>();
+    let url = Url::parse(&format!(
+        "{}://action/open_file_editor?path={path_param}&wait={wait_encoded}",
+        ChannelState::url_scheme()
+    ))
+    .unwrap();
+
+    let action = Action::parse(&url).unwrap();
+    match action {
+        Action::OpenFileEditor {
+            path, line_col, wait,
+        } => {
+            assert_eq!(path, expected_path);
+            assert_eq!(line_col, None);
+            assert_eq!(wait, Some(crate::edit_wait::WaitAddr(wait_str)));
+        }
+        _ => panic!("unexpected action: {action:?}"),
+    }
+}
+
+#[test]
+fn test_action_open_file_editor_parse_rejects_untrusted_wait_addr() {
+    let (path_param, expected_path) = open_file_editor_test_path("test.rs");
+    // An arbitrary socket path (outside our naming pattern) must be dropped, so
+    // the app never connects to an attacker-chosen local socket.
+    let url = Url::parse(&format!(
+        "{}://action/open_file_editor?path={path_param}&wait=%2Frun%2Fevil.sock",
+        ChannelState::url_scheme()
+    ))
+    .unwrap();
+
+    let action = Action::parse(&url).unwrap();
+    match action {
+        Action::OpenFileEditor {
+            path, line_col, wait,
+        } => {
+            assert_eq!(path, expected_path);
+            assert_eq!(line_col, None);
+            assert_eq!(wait, None);
         }
         _ => panic!("unexpected action: {action:?}"),
     }
@@ -360,7 +413,9 @@ fn test_action_open_file_editor_parse_with_line_only() {
 
     let action = Action::parse(&url).unwrap();
     match action {
-        Action::OpenFileEditor { path, line_col } => {
+        Action::OpenFileEditor {
+            path, line_col, ..
+        } => {
             assert_eq!(path, expected_path);
             assert_eq!(
                 line_col,
@@ -385,7 +440,9 @@ fn test_action_open_file_editor_parse_with_line_and_column() {
 
     let action = Action::parse(&url).unwrap();
     match action {
-        Action::OpenFileEditor { path, line_col } => {
+        Action::OpenFileEditor {
+            path, line_col, ..
+        } => {
             assert_eq!(path, expected_path);
             assert_eq!(
                 line_col,
@@ -411,7 +468,9 @@ fn test_action_open_file_editor_parse_decodes_percent_encoded_path() {
 
     let action = Action::parse(&url).unwrap();
     match action {
-        Action::OpenFileEditor { path, line_col } => {
+        Action::OpenFileEditor {
+            path, line_col, ..
+        } => {
             assert_eq!(path, expected_path);
             assert_eq!(
                 line_col,
@@ -435,7 +494,9 @@ fn test_action_open_file_editor_parse_expands_home_dir() {
 
     let action = Action::parse(&url).unwrap();
     match action {
-        Action::OpenFileEditor { path, line_col } => {
+        Action::OpenFileEditor {
+            path, line_col, ..
+        } => {
             assert_eq!(
                 path,
                 PathBuf::from(shellexpand::tilde("~/tmp/test.rs").into_owned())
