@@ -71,6 +71,7 @@ use warp_core::ui::theme::Fill;
 use warp_core::ui::Icon;
 use warp_core::user_preferences::GetUserPreferences as _;
 use warp_editor::editor::NavigationKey;
+use warp_server_client::auth::AuthEvent;
 use warp_util::path::{user_friendly_path, LineAndColumnArg};
 #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
 use warp_util::standardized_path::StandardizedPath;
@@ -108,7 +109,7 @@ use warpui::{
 
 use self::vertical_tabs::telemetry::{VerticalTabsDisplayOption, VerticalTabsTelemetryEvent};
 use self::vertical_tabs::{
-    render_detail_sidecar, render_settings_popup, VerticalTabsPanelState,
+    render_detail_sidecar, render_settings_popup, vtab_group_position_id, VerticalTabsPanelState,
     VERTICAL_TABS_SETTINGS_BUTTON_POSITION_ID,
 };
 #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
@@ -163,9 +164,9 @@ use crate::ai::agent_management::notifications::NotificationFilter;
 use crate::ai::agent_management::telemetry::AgentManagementTelemetryEvent;
 use crate::ai::agent_management::view::{AgentManagementView, AgentManagementViewEvent};
 use crate::ai::agent_management::AgentManagementEvent;
-#[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
-use crate::ai::ambient_agents::telemetry::HandoffEntryPoint;
 use crate::ai::ambient_agents::telemetry::{CloudAgentTelemetryEvent, CloudModeEntryPoint};
+#[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
+use crate::ai::ambient_agents::telemetry::{HandoffEntryPoint, HandoffInjectionPath};
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::blocklist::agent_view::agent_input_footer::editor::AgentToolbarEditorMode;
 use crate::ai::blocklist::agent_view::editor::{AgentToolbarEditorEvent, AgentToolbarEditorModal};
@@ -186,8 +187,8 @@ use crate::ai::blocklist::suggested_rule_modal::{
     SuggestedRuleAndId, SuggestedRuleModal, SuggestedRuleModalEvent,
 };
 use crate::ai::blocklist::{
-    BlocklistAIHistoryEvent, PendingQueryState, SerializedBlockListItem, SlashCommandRequest,
-    FORK_PREFIX,
+    BlocklistAIHistoryEvent, PendingQueryState, QueuedQueryOrigin, SerializedBlockListItem,
+    SlashCommandRequest, FORK_PREFIX,
 };
 use crate::ai::cloud_agent_settings::CloudAgentSettings;
 #[cfg(target_family = "wasm")]
@@ -308,8 +309,7 @@ use crate::server::cloud_objects::update_manager::{
 use crate::server::ids::{ObjectUid, ServerId, SyncId};
 use crate::server::network_log_pane_manager::NetworkLogPaneManager;
 use crate::server::server_api::ai::AIClient;
-use crate::server::server_api::auth::AuthClient;
-use crate::server::server_api::{ServerApi, ServerApiEvent, ServerApiProvider, ServerTime};
+use crate::server::server_api::{ServerApi, ServerApiProvider, ServerTime};
 use crate::server::telemetry::{
     AddTabWithShellSource, AnonymousUserSignupEntrypoint, CloseTarget, EnvVarTelemetryMetadata,
     FileTreeSource, KnowledgePaneEntrypoint, LaunchConfigUiLocation,
@@ -750,6 +750,7 @@ struct LocalToCloudHandoffOpenParams {
     launch: Option<PendingCloudLaunch>,
     environment_id: Option<SyncId>,
     intent: LocalToCloudHandoffIntent,
+    should_inject_continue: bool,
 }
 
 #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
@@ -2528,7 +2529,7 @@ impl Workspace {
     fn observe_server_api(ctx: &mut ViewContext<Self>) {
         let server_api_events = ServerApiProvider::handle(ctx);
         ctx.subscribe_to_model(&server_api_events, |me, _, event, ctx| {
-            if let ServerApiEvent::StagingAccessBlocked = event {
+            if let AuthEvent::StagingAccessBlocked = event {
                 if ChannelState::uses_staging_server() && me.shown_staging_banner_count < 5 {
                     me.shown_staging_banner_count += 1;
                     me.toast_stack.update(ctx, |toast_stack, ctx| {
@@ -3145,7 +3146,8 @@ impl Workspace {
                 ctx.notify();
             }
             AISettingsChangedEvent::IsActiveAIEnabled { .. }
-            | AISettingsChangedEvent::ThinkingDisplayMode { .. } => {
+            | AISettingsChangedEvent::ThinkingDisplayMode { .. }
+            | AISettingsChangedEvent::PromptSubmissionMode { .. } => {
                 ctx.notify();
             }
             AISettingsChangedEvent::ShowAgentNotifications { .. } => {
@@ -7119,6 +7121,43 @@ impl Workspace {
         ctx.notify();
     }
 
+    /// Flips `tab_index`'s group membership. Callers are responsible for
+    /// positioning the tab so groups remain contiguous; this method only
+    /// mutates `group_id` and prunes the old group when empty.
+    pub fn assign_tab_to_group(
+        &mut self,
+        tab_index: usize,
+        group_id: Option<TabGroupId>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if tab_index >= self.tabs.len() {
+            log::warn!(
+                "Tried to assign tab {tab_index} to a group but only {} tabs exist",
+                self.tabs.len()
+            );
+            return;
+        }
+        if let Some(gid) = group_id {
+            if !self.tab_groups.contains_key(&gid) {
+                log::warn!("Tried to assign tab {tab_index} to unknown group {gid:?}");
+                return;
+            }
+        }
+
+        if self.tabs[tab_index].group_id == group_id {
+            return;
+        }
+
+        let previous_group_id = self.tabs[tab_index].group_id;
+        self.tabs[tab_index].group_id = group_id;
+
+        if let Some(previous_group_id) = previous_group_id {
+            self.prune_empty_tab_group(previous_group_id, ctx);
+        }
+
+        ctx.notify();
+    }
+
     /// Removes a tab group from the workspace if no tabs reference it.
     fn prune_empty_tab_group(&mut self, group_id: TabGroupId, ctx: &mut ViewContext<Self>) {
         let has_members = group_member_indices(&self.tabs, group_id).next().is_some();
@@ -8745,14 +8784,15 @@ impl Workspace {
             let read_result = active_pane_group.read(ctx, |pane_group, ctx| {
                 pane_group.active_session_view(ctx).map(|terminal_view| {
                     let repo_path = terminal_view.as_ref(ctx).current_repo_path().cloned();
-                    (repo_path, terminal_view.downgrade())
+                    let preferred_session = terminal_view.as_ref(ctx).active_block_session_id();
+                    (repo_path, preferred_session, terminal_view.downgrade())
                 })
             });
             // Resolve DiffStateModel outside the read closure (needs mutable context).
-            read_result.and_then(|(repo_path, terminal_view)| {
+            read_result.and_then(|(repo_path, preferred_session, terminal_view)| {
                 let diff_state_model = repo_path.as_ref().and_then(|rp| {
                     self.working_directories_model.update(ctx, |model, ctx| {
-                        model.get_or_create_diff_state_model(rp.clone(), ctx)
+                        model.get_or_create_diff_state_model(rp.clone(), preferred_session, ctx)
                     })
                 })?;
                 Some((repo_path, diff_state_model, terminal_view))
@@ -8789,9 +8829,13 @@ impl Workspace {
         }
 
         let repo_location = panel_context.repo_path.clone();
+        let preferred_session = panel_context
+            .terminal_view
+            .upgrade(ctx)
+            .and_then(|tv| tv.as_ref(ctx).active_block_session_id());
         let diff_state_model = repo_location.as_ref().and_then(|rp| {
             self.working_directories_model.update(ctx, |model, ctx| {
-                model.get_or_create_diff_state_model(rp.clone(), ctx)
+                model.get_or_create_diff_state_model(rp.clone(), preferred_session, ctx)
             })
         });
         let Some(diff_state_model) = diff_state_model else {
@@ -8904,18 +8948,20 @@ impl Workspace {
         let read_result = pane_group_handle.read(ctx, |pane_group, ctx| {
             pane_group.active_session_view(ctx).map(|terminal_view| {
                 let repo_path = terminal_view.as_ref(ctx).current_repo_path().cloned();
-                (repo_path, terminal_view.downgrade())
+                let preferred_session = terminal_view.as_ref(ctx).active_block_session_id();
+                (repo_path, preferred_session, terminal_view.downgrade())
             })
         });
         // Resolve DiffStateModel outside the read closure (needs mutable context).
         let context = read_result.and_then(
-            |(repo_path, terminal_view): (
+            |(repo_path, preferred_session, terminal_view): (
                 Option<LocalOrRemotePath>,
+                Option<SessionId>,
                 WeakViewHandle<TerminalView>,
             )| {
                 let diff_state_model = repo_path.as_ref().and_then(|rp| {
                     self.working_directories_model.update(ctx, |model, ctx| {
-                        model.get_or_create_diff_state_model(rp.clone(), ctx)
+                        model.get_or_create_diff_state_model(rp.clone(), preferred_session, ctx)
                     })
                 })?;
                 Some(CodeReviewPaneContext {
@@ -12963,10 +13009,10 @@ impl Workspace {
                     });
 
                 if let Some(prompt) = initial_prompt {
-                    terminal_view.send_user_query_after_next_conversation_finished(
+                    terminal_view.enqueue_followup_prompt(
                         prompt,
-                        /* show_close_button */ true,
-                        /* show_send_now_button */ false,
+                        crate::ai::blocklist::QueuedQueryOrigin::ForkAndCompactSlashCommand,
+                        forked_conversation_id,
                         terminal_view_ctx,
                     );
                 }
@@ -13060,10 +13106,22 @@ impl Workspace {
             });
 
             if let Some(prompt) = initial_prompt {
-                terminal.send_user_query_after_next_conversation_finished(
-                    prompt, /* show_close_button */ true,
-                    /* show_send_now_button */ false, ctx,
-                );
+                // The slash-command handler at
+                // `app/src/terminal/input/slash_commands/mod.rs` for `/compact-and` short-circuits
+                // when there is no active conversation, so `selected_conversation_id` is set by the
+                // time we get here. Skip the follow-up if for some reason that invariant is broken.
+                if let Some(conversation_id) = terminal
+                    .ai_context_model()
+                    .as_ref(ctx)
+                    .selected_conversation_id(ctx)
+                {
+                    terminal.enqueue_followup_prompt(
+                        prompt,
+                        QueuedQueryOrigin::CompactAndSlashCommand,
+                        conversation_id,
+                        ctx,
+                    );
+                }
             }
         });
     }
@@ -14489,6 +14547,7 @@ impl Workspace {
             submission_state: HandoffSubmissionState::Idle,
             auto_submit: launch,
             orchestration_handoff: None,
+            should_inject_continue: false,
         };
         model_handle.update(ctx, |model, model_ctx| {
             model.set_pending_handoff(Some(pending), model_ctx);
@@ -14615,12 +14674,57 @@ impl Workspace {
             }
         };
 
+        // Chip, `&` Enter, and `/handoff` with no arg dispatch `launch: None`;
+        // synthesize an empty `PendingCloudLaunch` so auto-submit fires. The
+        // empty-prompt substitution happens in `build_handoff_spawn_request`.
+        // Attachments come from the source input for symmetry across entry points.
+        let launch = match (launch, intent) {
+            (
+                None,
+                LocalToCloudHandoffIntent::UserInitiated(
+                    HandoffEntryPoint::FooterChip
+                    | HandoffEntryPoint::Ampersand
+                    | HandoffEntryPoint::SlashCommand,
+                ),
+            ) => {
+                let attachments = source_view.update(ctx, |view, ctx| {
+                    let input = view.input().clone();
+                    input.update(ctx, |input, ctx| {
+                        input.collect_cloud_launch_attachments(ctx)
+                    })
+                });
+                Some(PendingCloudLaunch {
+                    prompt: String::new(),
+                    attachments,
+                })
+            }
+            (launch, _) => launch,
+        };
+
         let has_existing_conversation = source_conversation.as_ref().is_some_and(|c| !c.is_empty());
+
+        // Capture the source-conversation state once. An "active" source is
+        // non-empty AND in-progress/blocked; the wire-level substitution and
+        // the telemetry injection_path read the same bool so the two cannot
+        // drift across the in-progress cancellation below.
+        let source_conversation_active = source_conversation.as_ref().is_some_and(|c| {
+            !c.is_empty() && (c.status().is_in_progress() || c.status().is_blocked())
+        });
+        let empty_prompt = launch.as_ref().is_none_or(|l| l.prompt.is_empty());
+        let injection_path = if !empty_prompt {
+            HandoffInjectionPath::None
+        } else if source_conversation_active {
+            HandoffInjectionPath::Continue
+        } else {
+            HandoffInjectionPath::SnapshotRehydration
+        };
 
         send_telemetry_from_ctx!(
             CloudAgentTelemetryEvent::HandoffInitiated {
                 entry_point: intent.entry_point(),
                 forked_existing_conversation: has_existing_conversation,
+                empty_prompt,
+                injection_path,
             },
             ctx
         );
@@ -14646,9 +14750,7 @@ impl Workspace {
             return;
         }
 
-        if source_conversation.status().is_in_progress()
-            || source_conversation.status().is_blocked()
-        {
+        if source_conversation_active {
             let has_long_running_command =
                 source_view.as_ref(ctx).has_active_long_running_command();
 
@@ -14730,6 +14832,7 @@ impl Workspace {
                             launch,
                             environment_id,
                             intent,
+                            should_inject_continue: source_conversation_active,
                         },
                         ctx,
                     );
@@ -14766,6 +14869,7 @@ impl Workspace {
     /// Finishes the handoff after the fork RPC returns by restoring the forked
     /// conversation in a cloud pane and starting snapshot prep.
     #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
+    #[allow(clippy::too_many_arguments)]
     fn complete_local_to_cloud_handoff_open(
         &mut self,
         source_view: ViewHandle<TerminalView>,
@@ -14778,6 +14882,7 @@ impl Workspace {
             launch,
             environment_id,
             intent,
+            should_inject_continue,
         } = params;
         let show_user_feedback = intent.shows_user_feedback();
         let history_model = BlocklistAIHistoryModel::handle(ctx);
@@ -14896,6 +15001,7 @@ impl Workspace {
             submission_state: HandoffSubmissionState::Idle,
             auto_submit: launch,
             orchestration_handoff,
+            should_inject_continue,
         };
         model_handle.update(ctx, |model, model_ctx| {
             model.set_pending_handoff(Some(pending), model_ctx);
@@ -21732,6 +21838,15 @@ impl Workspace {
             }
         }
 
+        match ai_settings.default_prompt_submission_mode {
+            crate::settings::PromptSubmissionMode::Interrupt => {
+                context.set.insert(flags::PROMPT_SUBMISSION_INTERRUPT);
+            }
+            crate::settings::PromptSubmissionMode::Queue => {
+                context.set.insert(flags::PROMPT_SUBMISSION_QUEUE);
+            }
+        }
+
         if input_settings.is_terminal_input_message_bar_enabled() {
             context
                 .set
@@ -22710,6 +22825,16 @@ impl TypedActionView for Workspace {
                 self.finish_tab_rename(ctx);
                 self.current_workspace_state.is_tab_being_dragged = true;
             }
+            StartGroupDrag(_group_id) => {
+                self.finish_tab_group_rename(ctx);
+            }
+            DragGroup { group_id, position } => {
+                self.on_group_drag(*group_id, *position, ctx);
+            }
+            DropGroup => {
+                send_telemetry_from_ctx!(TelemetryEvent::DragAndDropTabGroup, ctx);
+                ctx.notify();
+            }
             OpenWarpDrive => {
                 if WarpDriveSettings::is_warp_drive_enabled(ctx) {
                     self.open_left_panel_view(&LeftPanelAction::WarpDrive, ctx);
@@ -22779,13 +22904,19 @@ impl TypedActionView for Workspace {
                             .map(|terminal_view| {
                                 let repo_path =
                                     terminal_view.as_ref(ctx).current_repo_path().cloned();
-                                (repo_path, terminal_view.downgrade())
+                                let preferred_session =
+                                    terminal_view.as_ref(ctx).active_block_session_id();
+                                (repo_path, preferred_session, terminal_view.downgrade())
                             })
                     });
-                    if let Some((repo_path, terminal_view)) = read_result {
+                    if let Some((repo_path, preferred_session, terminal_view)) = read_result {
                         let diff_state_model = repo_path.as_ref().and_then(|rp| {
                             self.working_directories_model.update(ctx, |model, ctx| {
-                                model.get_or_create_diff_state_model(rp.clone(), ctx)
+                                model.get_or_create_diff_state_model(
+                                    rp.clone(),
+                                    preferred_session,
+                                    ctx,
+                                )
                             })
                         });
                         if let Some(diff_state_model) = diff_state_model {
@@ -26220,15 +26351,64 @@ impl Workspace {
             return;
         }
 
-        let new_index = if FeatureFlag::VerticalTabs.is_enabled()
-            && *TabSettings::as_ref(ctx).use_vertical_tabs
-        {
+        let use_vertical_tabs =
+            FeatureFlag::VerticalTabs.is_enabled() && *TabSettings::as_ref(ctx).use_vertical_tabs;
+        let groups_enabled = FeatureFlag::GroupedTabs.is_enabled();
+
+        if use_vertical_tabs && groups_enabled {
+            // Reassign membership when the dragged tab's midpoint enters a
+            // different expanded group. Collapsed groups are handled by the
+            // safety-net hop below so we don't drop into it.
+            let midpoint_drag_y = (position.min_y() + position.max_y()) / 2.;
+            let hovered_group = self.target_group_at_y(midpoint_drag_y, ctx);
+            let source_group = self.tabs[current_index].group_id;
+            let expanded_target =
+                hovered_group.filter(|gid| !self.tab_groups.get(gid).is_some_and(|g| g.collapsed));
+            if expanded_target != source_group {
+                self.assign_tab_to_group(current_index, expanded_target, ctx);
+                // Hop into the target group's contiguous block so the group
+                // stays one rendered container. Vertical tab rendering only
+                // groups consecutive tabs, so leaving `current_index` outside
+                // the block would split the group across the panel.
+                if let Some(target_gid) = expanded_target {
+                    if let Some((first, last)) = group_member_index_range(&self.tabs, target_gid) {
+                        let insert_at = if current_index < first { first } else { last };
+                        if insert_at != current_index {
+                            self.hop_tab_to_index(current_index, insert_at, ctx);
+                        }
+                    }
+                }
+                return;
+            }
+        }
+
+        let new_index = if use_vertical_tabs {
             self.calculate_updated_tab_index_vertical(current_index, position, ctx)
         } else {
             self.calculate_updated_tab_index(current_index, position, ctx)
         };
 
         if new_index != current_index {
+            // Prevent dropping into a collapsed group: if the swap target is a
+            // collapsed-group member the dragged tab doesn't belong to, hop
+            // past the whole block instead of swapping into it.
+            let dragged_group = self.tabs[current_index].group_id;
+            let neighbor_collapsed_group = self
+                .tabs
+                .get(new_index)
+                .and_then(|t| t.group_id)
+                .filter(|gid| {
+                    Some(*gid) != dragged_group
+                        && self.tab_groups.get(gid).is_some_and(|g| g.collapsed)
+                });
+            if let Some(group_id) = neighbor_collapsed_group {
+                if let Some((first, last)) = group_member_index_range(&self.tabs, group_id) {
+                    let insert_at = if current_index < first { last } else { first };
+                    self.hop_tab_to_index(current_index, insert_at, ctx);
+                    return;
+                }
+            }
+
             self.tabs.swap(new_index, current_index);
 
             if current_index == self.active_tab_index {
@@ -26360,7 +26540,7 @@ impl Workspace {
         let midpoint_drag_y = (drag_position.min_y() + drag_position.max_y()) / 2.;
 
         let maybe_above_tab = if current_index > 0 {
-            ctx.element_position_by_id(tab_position_id(current_index - 1))
+            self.neighbor_drag_rect(current_index - 1, ctx)
         } else {
             None
         };
@@ -26372,7 +26552,7 @@ impl Workspace {
         }
 
         let maybe_below_tab = if current_index < self.tabs.len() - 1 {
-            ctx.element_position_by_id(tab_position_id(current_index + 1))
+            self.neighbor_drag_rect(current_index + 1, ctx)
         } else {
             None
         };
@@ -26384,6 +26564,96 @@ impl Workspace {
         }
 
         current_index
+    }
+
+    /// Returns the group whose saved container rect contains `cursor_y`, if any.
+    /// A small edge margin at each end of the rect is treated as "between groups"
+    /// so the cursor can land in the ungrouped zone between adjacent groups.
+    fn target_group_at_y(&self, cursor_y: f32, ctx: &mut ViewContext<Self>) -> Option<TabGroupId> {
+        const EDGE_MARGIN: f32 = 6.0;
+        self.tab_groups.keys().copied().find(|group_id| {
+            ctx.element_position_by_id(vtab_group_position_id(*group_id))
+                .is_some_and(|rect| {
+                    rect.min_y() + EDGE_MARGIN <= cursor_y && cursor_y <= rect.max_y() - EDGE_MARGIN
+                })
+        })
+    }
+
+    /// Returns the drag comparison rect for `neighbor_index`.
+    ///
+    /// For members of a collapsed group the per-tab `tab_position_id` rect
+    /// is stale (the tab is no longer painted, but `PositionCache` keeps the
+    /// last painted rect). Use the group container's rect instead so
+    /// midpoint comparisons fire at the visible header.
+    fn neighbor_drag_rect(
+        &self,
+        neighbor_index: usize,
+        ctx: &mut ViewContext<Self>,
+    ) -> Option<RectF> {
+        let neighbor_group_id = self.tabs.get(neighbor_index).and_then(|t| t.group_id);
+        let neighbor_in_collapsed_group = neighbor_group_id
+            .and_then(|gid| self.tab_groups.get(&gid))
+            .is_some_and(|g| g.collapsed);
+
+        if neighbor_in_collapsed_group {
+            return ctx.element_position_by_id(vtab_group_position_id(neighbor_group_id.unwrap()));
+        }
+
+        ctx.element_position_by_id(tab_position_id(neighbor_index))
+    }
+
+    /// Swaps the group's entire member block with its above/below neighbor
+    /// when the dragged header's Y midpoint crosses the neighbor's midpoint.
+    pub(crate) fn on_group_drag(
+        &mut self,
+        group_id: TabGroupId,
+        position: RectF,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some((first, last)) = group_member_index_range(&self.tabs, group_id) else {
+            return;
+        };
+        let midpoint_drag_y = (position.min_y() + position.max_y()) / 2.;
+
+        // Swap up: check the neighbor directly above the group's first member.
+        if first > 0 {
+            let above_index = first - 1;
+            if let Some(rect) = self.neighbor_drag_rect(above_index, ctx) {
+                let neighbor_midpoint = (rect.min_y() + rect.max_y()) / 2.;
+                if midpoint_drag_y < neighbor_midpoint {
+                    let target = if let Some(other_gid) = self.tabs[above_index].group_id {
+                        group_member_index_range(&self.tabs, other_gid)
+                            .map(|(f, _)| f)
+                            .unwrap_or(above_index)
+                    } else {
+                        above_index
+                    };
+                    self.move_group_block(group_id, target, ctx);
+                    return;
+                }
+            }
+        }
+
+        // Swap down: check the neighbor directly below the group's last member.
+        // Pass `below_block_last + 1` (the pre-drain target index); `move_group_block`
+        // accounts for the drain internally when `target > last`.
+        if last + 1 < self.tabs.len() {
+            let below_index = last + 1;
+            if let Some(rect) = self.neighbor_drag_rect(below_index, ctx) {
+                let neighbor_midpoint = (rect.min_y() + rect.max_y()) / 2.;
+                if midpoint_drag_y > neighbor_midpoint {
+                    let below_block_last = if let Some(other_gid) = self.tabs[below_index].group_id
+                    {
+                        group_member_index_range(&self.tabs, other_gid)
+                            .map(|(_, l)| l)
+                            .unwrap_or(below_index)
+                    } else {
+                        below_index
+                    };
+                    self.move_group_block(group_id, below_block_last + 1, ctx);
+                }
+            }
+        }
     }
 }
 
