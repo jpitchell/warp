@@ -891,6 +891,9 @@ pub enum FeatureFlag {
     /// Gates the SuperGrok feature, which lets users
     /// connect a Grok subscription instead of pasting an API key.
     SuperGrok,
+
+    /// Gates the Source Control left-panel tab.
+    SourceControlPanel,
 }
 
 static FLAG_STATES: [AtomicBool; cardinality::<FeatureFlag>()] =

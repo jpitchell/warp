@@ -12,6 +12,7 @@ pub(crate) mod onboarding;
 pub(crate) mod openwarp_launch_modal;
 pub(crate) mod orchestration_launch_modal;
 pub(crate) mod right_panel;
+pub mod source_control;
 mod startup_directory;
 mod tab_grouping;
 #[cfg(test)]
@@ -327,8 +328,8 @@ use crate::settings::{
     AccessibilitySettings, AliasExpansionSettings, AppEditorSettings, BlockVisibilitySettings,
     ChangelogSettings, CodeSettings, CodeSettingsChangedEvent, CtrlTabBehavior, CursorBlink,
     DebugSettings, DefaultSessionMode, FontSettings, GPUSettings, InputModeSettings, InputSettings,
-    MonospaceFontSize, PaneSettings, PrivacySettings, SelectionSettings, Settings, SshSettings,
-    ThemeSettings,
+    MonospaceFontSize, PaneSettings, PrivacySettings, SelectionSettings, Settings,
+    SourceControlSettings, SourceControlSettingsChangedEvent, SshSettings, ThemeSettings,
 };
 use crate::settings_view::environments_page::EnvironmentsPage;
 use crate::settings_view::handoff_environment_creation_modal::{
@@ -609,6 +610,7 @@ pub(crate) const TOGGLE_VERTICAL_TABS_PANEL_BINDING_NAME: &str =
 pub(crate) const OPEN_GLOBAL_SEARCH_BINDING_NAME: &str = "workspace:open_global_search";
 pub(crate) const TOGGLE_CONVERSATION_LIST_VIEW_BINDING_NAME: &str =
     "workspace:toggle_conversation_list_view";
+pub(crate) const TOGGLE_SOURCE_CONTROL_BINDING_NAME: &str = "workspace:toggle_source_control";
 pub(crate) const NEW_TAB_BINDING_NAME: &str = "workspace:new_tab";
 pub(crate) const NEW_TERMINAL_TAB_BINDING_NAME: &str = "workspace:new_terminal_tab";
 pub(crate) const NEW_AGENT_TAB_BINDING_NAME: &str = "workspace:new_agent_tab";
@@ -622,6 +624,8 @@ pub(crate) const LEFT_PANEL_GLOBAL_SEARCH_BINDING_NAME: &str = "workspace:left_p
 pub(crate) const LEFT_PANEL_WARP_DRIVE_BINDING_NAME: &str = "workspace:left_panel_warp_drive";
 pub(crate) const LEFT_PANEL_AGENT_CONVERSATIONS_BINDING_NAME: &str =
     "workspace:left_panel_agent_conversations";
+pub(crate) const LEFT_PANEL_SOURCE_CONTROL_BINDING_NAME: &str =
+    "workspace:left_panel_source_control";
 
 const KEYBINDINGS_TO_CACHE: [&str; 4] = [
     ASK_AI_ASSISTANT_KEYBINDING_NAME,
@@ -3066,6 +3070,16 @@ impl Workspace {
             }
         });
 
+        ctx.subscribe_to_model(&SourceControlSettings::handle(ctx), |me, _, event, ctx| {
+            if matches!(
+                event,
+                SourceControlSettingsChangedEvent::ShowSourceControl { .. }
+            ) {
+                me.update_left_panel_available_views(ctx);
+                ctx.notify();
+            }
+        });
+
         let toast_stack =
             ctx.add_typed_action_view(|_| DismissibleToastStack::new(Duration::from_secs(4)));
 
@@ -4034,6 +4048,7 @@ impl Workspace {
                 },
                 LeftPanelDisplayedTab::WarpDrive => ToolPanelView::WarpDrive,
                 LeftPanelDisplayedTab::ConversationListView => ToolPanelView::ConversationListView,
+                LeftPanelDisplayedTab::SourceControl => ToolPanelView::SourceControl,
             };
             lp.restore_active_view_from_snapshot(active_view, ctx);
             lp.set_active_pane_group(pane_group.clone(), &self.working_directories_model, ctx);
@@ -19378,6 +19393,7 @@ impl Workspace {
                         ToolPanelView::GlobalSearch { .. } => "Global search",
                         ToolPanelView::WarpDrive => "Warp Drive",
                         ToolPanelView::ConversationListView => "Agent conversations",
+                        ToolPanelView::SourceControl => "Source control",
                     }
                 } else {
                     "Tools panel"
@@ -19432,6 +19448,7 @@ impl Workspace {
                 ToolPanelView::GlobalSearch { .. } => "Global search",
                 ToolPanelView::WarpDrive => "Warp Drive",
                 ToolPanelView::ConversationListView => "Agent conversations",
+                ToolPanelView::SourceControl => "Source control",
             }
         } else {
             "Tools panel"
@@ -22703,6 +22720,14 @@ impl Workspace {
                 entry_focus: GlobalSearchEntryFocus::Results,
             });
         }
+        if cfg!(feature = "local_fs")
+            && FeatureFlag::SourceControlPanel.is_enabled()
+            && *SourceControlSettings::as_ref(ctx)
+                .show_source_control
+                .value()
+        {
+            views.push(ToolPanelView::SourceControl);
+        }
         if WarpDriveSettings::is_warp_drive_enabled(ctx) {
             views.push(ToolPanelView::WarpDrive);
         }
@@ -24802,6 +24827,15 @@ impl TypedActionView for Workspace {
                     );
                 }
             }
+            ToggleSourceControlPanel => {
+                if FeatureFlag::SourceControlPanel.is_enabled()
+                    && *SourceControlSettings::as_ref(ctx).show_source_control
+                {
+                    let is_showing = self.left_panel_view.as_ref(ctx).active_view()
+                        == ToolPanelView::SourceControl;
+                    self.toggle_left_panel_view(&LeftPanelAction::SourceControl, is_showing, ctx);
+                }
+            }
             ShowRewindConfirmationDialog {
                 ai_block_view_id,
                 exchange_id,
@@ -25059,6 +25093,9 @@ impl View for Workspace {
         }
         if *CodeSettings::as_ref(app).show_global_search {
             context.set.insert(flags::SHOW_GLOBAL_SEARCH);
+        }
+        if *SourceControlSettings::as_ref(app).show_source_control {
+            context.set.insert(flags::SHOW_SOURCE_CONTROL);
         }
 
         if self.team_uid(app).is_some() {

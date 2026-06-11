@@ -503,6 +503,8 @@ fn enabled_features() -> HashSet<FeatureFlag> {
         FeatureFlag::CliAgentFileLinks,
         #[cfg(feature = "supergrok")]
         FeatureFlag::SuperGrok,
+        #[cfg(feature = "source_control_panel")]
+        FeatureFlag::SourceControlPanel,
     ]);
 
     flags

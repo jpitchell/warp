@@ -66,11 +66,12 @@ pub use toast_stack::ToastStack;
 
 use crate::workspace::view::{
     LEFT_PANEL_AGENT_CONVERSATIONS_BINDING_NAME, LEFT_PANEL_GLOBAL_SEARCH_BINDING_NAME,
-    LEFT_PANEL_PROJECT_EXPLORER_BINDING_NAME, LEFT_PANEL_WARP_DRIVE_BINDING_NAME,
-    NEW_AGENT_TAB_BINDING_NAME, NEW_AMBIENT_AGENT_TAB_BINDING_NAME, NEW_TAB_BINDING_NAME,
-    NEW_TERMINAL_TAB_BINDING_NAME, OPEN_GLOBAL_SEARCH_BINDING_NAME,
-    TOGGLE_CONVERSATION_LIST_VIEW_BINDING_NAME, TOGGLE_NOTIFICATION_MAILBOX_BINDING_NAME,
-    TOGGLE_PROJECT_EXPLORER_BINDING_NAME, TOGGLE_RIGHT_PANEL_BINDING_NAME,
+    LEFT_PANEL_PROJECT_EXPLORER_BINDING_NAME, LEFT_PANEL_SOURCE_CONTROL_BINDING_NAME,
+    LEFT_PANEL_WARP_DRIVE_BINDING_NAME, NEW_AGENT_TAB_BINDING_NAME,
+    NEW_AMBIENT_AGENT_TAB_BINDING_NAME, NEW_TAB_BINDING_NAME, NEW_TERMINAL_TAB_BINDING_NAME,
+    OPEN_GLOBAL_SEARCH_BINDING_NAME, TOGGLE_CONVERSATION_LIST_VIEW_BINDING_NAME,
+    TOGGLE_NOTIFICATION_MAILBOX_BINDING_NAME, TOGGLE_PROJECT_EXPLORER_BINDING_NAME,
+    TOGGLE_RIGHT_PANEL_BINDING_NAME, TOGGLE_SOURCE_CONTROL_BINDING_NAME,
     TOGGLE_TAB_CONFIGS_MENU_BINDING_NAME, TOGGLE_VERTICAL_TABS_PANEL_BINDING_NAME,
     TOGGLE_WARP_DRIVE_BINDING_NAME,
 };
@@ -97,6 +98,7 @@ pub fn init(app: &mut AppContext) {
     view::free_tier_limit_hit_modal::init(app);
     view::global_search::view::GlobalSearchView::init(app);
     view::right_panel::RightPanelView::init(app);
+    view::source_control::view::SourceControlView::init(app);
     header_toolbar_editor::init(app);
     view::conversation_list::view::register_conversation_list_view_bindings(app);
 
@@ -737,6 +739,14 @@ pub fn init(app: &mut AppContext) {
         .with_enabled(|| FeatureFlag::AgentViewConversationListView.is_enabled())
         .with_custom_action(CustomAction::ToggleConversationListView),
         EditableBinding::new(
+            LEFT_PANEL_SOURCE_CONTROL_BINDING_NAME,
+            BindingDescription::new("Left Panel: Source control"),
+            WorkspaceAction::ToggleSourceControlPanel,
+        )
+        .with_group(bindings::BindingGroup::Navigation.as_str())
+        .with_context_predicate(id!("Workspace") & id!(flags::SHOW_SOURCE_CONTROL))
+        .with_enabled(|| FeatureFlag::SourceControlPanel.is_enabled()),
+        EditableBinding::new(
             LEFT_PANEL_GLOBAL_SEARCH_BINDING_NAME,
             BindingDescription::new("Left Panel: Global search"),
             WorkspaceAction::ToggleGlobalSearch,
@@ -800,6 +810,15 @@ pub fn init(app: &mut AppContext) {
         .with_mac_key_binding("cmd-shift-A")
         .with_linux_or_windows_key_binding("ctrl-shift-A")
         .with_group(bindings::BindingGroup::WarpAi.as_str()),
+        EditableBinding::new(
+            TOGGLE_SOURCE_CONTROL_BINDING_NAME,
+            BindingDescription::new("Toggle source control panel")
+                .with_custom_description(bindings::MAC_MENUS_CONTEXT, "Source Control Panel"),
+            WorkspaceAction::ToggleSourceControlPanel,
+        )
+        .with_enabled(|| FeatureFlag::SourceControlPanel.is_enabled())
+        .with_context_predicate(id!("Workspace") & id!(flags::SHOW_SOURCE_CONTROL))
+        .with_group(bindings::BindingGroup::Navigation.as_str()),
         EditableBinding::new(
             "workspace:close_panel",
             BindingDescription::new("Close focused panel")
