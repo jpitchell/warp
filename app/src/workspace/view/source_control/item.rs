@@ -386,47 +386,17 @@ pub fn render_section_header(
         );
     }
 
-    let state_clone = state.clone();
-    let content = content.finish();
-    let row = Flex::row()
+    // Header actions are always rendered (subtle icon buttons) rather than
+    // hover-revealed: the Hoverable render closure can't rebuild tooltip-built
+    // buttons per hover change, and persistent affordances read fine at the
+    // panel's narrow width.
+    let mut full_row = Flex::row()
         .with_main_axis_size(MainAxisSize::Max)
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
         .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
-        .with_child(content);
-
-    let actions_for_render = actions;
-    let appearance_for_render = appearance.clone();
-    let hoverable = Hoverable::new(state.row.clone(), {
-        let app_ptr = app as *const AppContext;
-        move |mouse_state| {
-            // SAFETY-free: the Hoverable render closure runs synchronously
-            // during this render pass, so reborrowing `app` is sound — but to
-            // stay in safe Rust we instead capture clones above.
-            let _ = app_ptr;
-            let mut row = Flex::row()
-                .with_main_axis_size(MainAxisSize::Max)
-                .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                .with_main_axis_alignment(MainAxisAlignment::SpaceBetween);
-            let _ = &row;
-            let _ = mouse_state;
-            unreachable!()
-        }
-    });
-    // The closure-based Hoverable above can't borrow `app`; build the header
-    // without hover-dependent action visibility instead. Actions are always
-    // rendered (they are subtle icon buttons), matching the panel's narrow
-    // width budget.
-    drop(hoverable);
-    let _ = state_clone;
-
-    let mut full_row = row;
-    if !actions_for_render.is_empty() {
-        full_row.add_child(render_row_actions(
-            actions_for_render,
-            state,
-            &appearance_for_render,
-            app,
-        ));
+        .with_child(content.finish());
+    if !actions.is_empty() {
+        full_row.add_child(render_row_actions(actions, state, appearance, app));
     }
     let full_row = full_row.finish();
 

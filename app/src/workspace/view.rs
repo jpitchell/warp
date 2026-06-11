@@ -6213,6 +6213,56 @@ impl Workspace {
                     ctx,
                 );
             }
+            #[cfg_attr(not(feature = "local_fs"), allow(unused_variables))]
+            LeftPanelEvent::OpenSourceControlDiff {
+                repo_path,
+                file_path,
+            } => {
+                #[cfg(feature = "local_fs")]
+                {
+                    let pane_group = self.active_tab_pane_group().clone();
+                    let Some(terminal_view) = pane_group
+                        .read(ctx, |pane_group, ctx| pane_group.active_session_view(ctx))
+                        .map(|terminal_view| terminal_view.downgrade())
+                    else {
+                        return;
+                    };
+                    let repo_location = LocalOrRemotePath::Local(repo_path.clone());
+                    let arg = CodeReviewPanelArg {
+                        repo_path: Some(repo_location.clone()),
+                        terminal_view,
+                        entrypoint: CodeReviewPaneEntrypoint::Other,
+                        focus_new_pane: false,
+                        cli_agent: None,
+                    };
+                    self.open_code_review_panel_from_arg(&arg, pane_group.clone(), ctx);
+                    if let Some(code_review_view) = self
+                        .working_directories_model
+                        .as_ref(ctx)
+                        .get_code_review_view(pane_group.id(), &repo_location)
+                    {
+                        let file_path = file_path.clone();
+                        code_review_view.update(ctx, |view, ctx| {
+                            view.select_file_by_path(&file_path, ctx);
+                        });
+                    }
+                }
+            }
+            LeftPanelEvent::ChangeDirectoryInActiveTerminal { path } => {
+                let Some(input_handle) = self.get_active_input_view_handle(ctx) else {
+                    return;
+                };
+                let Some(path_str) = path.to_str() else {
+                    return;
+                };
+                // Same execution path the prompt git-branch chip's
+                // `PromptChipShellCommand::ChangeDirectory` bottoms out in.
+                let cd_command = format!("cd {}", shell_words::quote(path_str));
+                input_handle.update(ctx, |input, ctx| {
+                    input.try_execute_command(&cd_command, ctx);
+                    ctx.notify();
+                });
+            }
         }
     }
 

@@ -53,7 +53,9 @@ use crate::workspace::view::conversation_list::view::{
 use crate::workspace::view::global_search::view::{
     Event as GlobalSearchViewEvent, GlobalSearchEntryFocus, GlobalSearchView,
 };
-use crate::workspace::view::source_control::view::SourceControlView;
+use crate::workspace::view::source_control::view::{
+    Event as SourceControlViewEvent, SourceControlView,
+};
 use crate::workspace::view::{
     LEFT_PANEL_AGENT_CONVERSATIONS_BINDING_NAME, LEFT_PANEL_GLOBAL_SEARCH_BINDING_NAME,
     LEFT_PANEL_PROJECT_EXPLORER_BINDING_NAME, LEFT_PANEL_SOURCE_CONTROL_BINDING_NAME,
@@ -99,6 +101,17 @@ pub enum LeftPanelEvent {
         conversation_title: String,
         terminal_view_id: Option<warpui::EntityId>,
     },
+    /// Open the code review right panel for `repo_path` and select
+    /// `file_path` (repo-relative). Emitted by the Source Control panel.
+    #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
+    OpenSourceControlDiff {
+        repo_path: PathBuf,
+        file_path: String,
+    },
+    /// Execute a `cd` in the active terminal (worktree-aware branch checkout
+    /// from the Source Control panel).
+    #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
+    ChangeDirectoryInActiveTerminal { path: PathBuf },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -243,6 +256,10 @@ impl LeftPanelView {
             }
         });
 
+        ctx.subscribe_to_view(&source_control_view, |_me, _, event, ctx| {
+            Self::handle_source_control_event(event, ctx);
+        });
+
         let active_view = views.first().copied().unwrap_or(ToolPanelView::WarpDrive);
         let toolbelt_buttons = views
             .iter()
@@ -304,6 +321,13 @@ impl LeftPanelView {
                     me.get_or_create_global_search_view_for_pane_group(active_pane_group.id(), ctx);
                 global_search_view.update(ctx, |view, view_ctx| {
                     view.set_root_directories(local_paths.clone(), view_ctx);
+                });
+
+                // The Source Control panel follows the active session's most
+                // recent directory.
+                let most_recent_directory = directories.first().map(|d| d.path.clone());
+                me.source_control_view.update(ctx, |view, ctx| {
+                    view.set_active_directory(most_recent_directory, ctx);
                 });
 
                 // Directories are already in display order (most recent first) from the model
@@ -660,6 +684,11 @@ impl LeftPanelView {
             view.set_root_directories(local_paths.clone(), view_ctx);
         });
 
+        let most_recent_directory = active_directories.first().map(|d| d.path.clone());
+        self.source_control_view.update(ctx, |view, ctx| {
+            view.set_active_directory(most_recent_directory, ctx);
+        });
+
         let local_directories = deduplicate_by_directory_name(local_paths);
         let active_file_model = pane_group.as_ref(ctx).active_file_model().clone();
 
@@ -798,6 +827,51 @@ impl LeftPanelView {
                 });
             }
         }
+    }
+
+    #[cfg(feature = "local_fs")]
+    fn handle_source_control_event(event: &SourceControlViewEvent, ctx: &mut ViewContext<Self>) {
+        match event {
+            SourceControlViewEvent::OpenFile { path } => {
+                let settings = EditorSettings::as_ref(ctx);
+                let target = resolve_file_target_with_editor_choice(
+                    path,
+                    *settings.open_code_panels_file_editor,
+                    *settings.prefer_markdown_viewer,
+                    *settings.open_file_layout,
+                    None,
+                );
+                ctx.emit(LeftPanelEvent::OpenFileWithTarget {
+                    location: LocalOrRemotePath::Local(path.clone()),
+                    target,
+                    line_col: None,
+                });
+            }
+            SourceControlViewEvent::OpenDiff {
+                repo_path,
+                file_path,
+            } => {
+                ctx.emit(LeftPanelEvent::OpenSourceControlDiff {
+                    repo_path: repo_path.clone(),
+                    file_path: file_path.clone(),
+                });
+            }
+            SourceControlViewEvent::OpenWorktreeInNewTab { path } => {
+                ctx.emit(LeftPanelEvent::FileTree(
+                    pane_group::Event::OpenDirectoryInNewTab { path: path.clone() },
+                ));
+            }
+            SourceControlViewEvent::ChangeDirectory { path } => {
+                ctx.emit(LeftPanelEvent::ChangeDirectoryInActiveTerminal { path: path.clone() });
+            }
+        }
+    }
+
+    #[cfg(not(feature = "local_fs"))]
+    fn handle_source_control_event(
+        _event: &SourceControlViewEvent,
+        _ctx: &mut ViewContext<Self>,
+    ) {
     }
 
     #[cfg(feature = "local_fs")]
