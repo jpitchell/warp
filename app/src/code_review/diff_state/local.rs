@@ -14,13 +14,6 @@ use instant::Instant;
 #[cfg(feature = "local_fs")]
 use warp_util::standardized_path::StandardizedPath;
 
-cfg_if::cfg_if! {
-    if #[cfg(feature = "local_fs")] {
-        use std::fs;
-    }
-}
-#[cfg(not(target_family = "wasm"))]
-use warp_core::channel::ChannelState;
 use warp_core::send_telemetry_from_ctx;
 #[cfg(feature = "local_fs")]
 use warp_core::sync_queue::SyncQueue;
@@ -574,156 +567,24 @@ impl LocalDiffStateModel {
         // Noop on WASM builds.
     }
 
-    /// Stashes uncommitted changes for specific files
+    /// Stashes uncommitted changes for specific files. Delegates to the shared
+    /// implementation in `source_control::git_ops` so the code-review discard
+    /// path and the Source Control panel share one implementation.
     #[cfg(feature = "local_fs")]
     async fn stash_uncommitted_changes(repo_path: &Path, relative_paths: &[String]) -> Result<()> {
-        let app_id = ChannelState::app_id();
-        let app_name = app_id.application_name();
-        let msg = if relative_paths.len() == 1 {
-            format!("{app_name}: stash {}", relative_paths[0])
-        } else {
-            format!("{app_name}: stash {} files", relative_paths.len())
-        };
-
-        let mut stash_args = vec!["stash", "push", "-u", "-m", msg.as_str(), "--"];
-        for path in relative_paths {
-            stash_args.push(path.as_str());
-        }
-
-        log::debug!(
-            "[GIT OPERATION] local.rs stash_uncommitted_changes git {}",
-            stash_args.join(" ")
-        );
-        let stash_res = run_git_command(repo_path, &stash_args).await;
-
-        match stash_res {
-            Ok(_) => Ok(()),
-            Err(err) => {
-                let err_msg = err.to_string();
-                // If there are no local changes to stash, git stash will fail
-                // In this case, we can safely ignore the error
-                if err_msg.contains("No local changes to save") {
-                    Ok(())
-                } else {
-                    let context = if relative_paths.len() == 1 {
-                        relative_paths[0].clone()
-                    } else {
-                        format!("{} files", relative_paths.len())
-                    };
-                    Err(anyhow!(
-                        "Failed to stash changes for {}: {}",
-                        context,
-                        err_msg
-                    ))
-                }
-            }
-        }
+        crate::source_control::git_ops::stash_uncommitted_changes(repo_path, relative_paths).await
     }
-    /// Runs git restore and git clean for one or more files
+
+    /// Runs git restore and git clean for one or more files. Delegates to the
+    /// shared implementation in `source_control::git_ops`.
     #[cfg(feature = "local_fs")]
     async fn git_restore_and_clean(
         repo_path: &Path,
         relative_paths: &[String],
         branch: &str,
     ) -> Result<()> {
-        let source_arg = format!("--source={branch}");
-        let mut restore_args = vec![
-            "restore",
-            "--staged",
-            "--worktree",
-            source_arg.as_str(),
-            "--",
-        ];
-        for path in relative_paths {
-            restore_args.push(path.as_str());
-        }
-
-        log::debug!(
-            "[GIT OPERATION] local.rs git_restore_and_clean git {}",
-            restore_args.join(" ")
-        );
-        let restore_res = run_git_command(repo_path, &restore_args).await;
-
-        match restore_res {
-            Ok(_) => {
-                // Clean untracked files for these specific paths
-                let mut clean_args = vec!["clean", "-fd"];
-                for path in relative_paths {
-                    clean_args.push(path.as_str());
-                }
-                log::debug!(
-                    "[GIT OPERATION] local.rs git_restore_and_clean git {}",
-                    clean_args.join(" ")
-                );
-                let clean_res = run_git_command(repo_path, &clean_args).await;
-
-                match clean_res {
-                    Ok(_) => Ok(()),
-                    Err(err) => {
-                        log::warn!("Failed to clean untracked files: {err}");
-                        Ok(())
-                    }
-                }
-            }
-            Err(err) => {
-                let err_msg = err.to_string();
-                if branch == "HEAD" && err_msg.contains("could not resolve HEAD") {
-                    let mut clean_args = vec!["clean", "-fd"];
-                    for path in relative_paths {
-                        clean_args.push(path.as_str());
-                    }
-                    log::debug!(
-                        "[GIT OPERATION] local.rs git_restore_and_clean git {}",
-                        clean_args.join(" ")
-                    );
-                    let clean_res = run_git_command(repo_path, &clean_args).await;
-                    if let Err(err) = clean_res {
-                        log::warn!("Failed to clean untracked files: {err}");
-                    }
-                    Ok(())
-                } else if err_msg.contains("did not match any file(s) known to git") {
-                    // If some files don't exist in the branch, we need to remove them
-                    for file_path in relative_paths {
-                        log::debug!(
-                            "[GIT OPERATION] local.rs git_restore_and_clean git rm -f -- {file_path}"
-                        );
-                        let rm_res =
-                            run_git_command(repo_path, &["rm", "-f", "--", file_path.as_str()])
-                                .await;
-
-                        if let Err(rm_err) = rm_res {
-                            let rm_err_msg = rm_err.to_string();
-                            if rm_err_msg.contains("did not match any files") {
-                                // if the file was staged but it isn't in the working directory,
-                                // e.g. it was locally deleted
-                                log::debug!(
-                                    "[GIT OPERATION] local.rs git_restore_and_clean git reset -- {file_path}"
-                                );
-                                if let Err(e) =
-                                    run_git_command(repo_path, &["reset", "--", file_path.as_str()])
-                                        .await
-                                {
-                                    log::warn!("Failed to unstage file '{file_path}': {e}");
-                                }
-                            } else {
-                                log::warn!("Failed to remove file '{file_path}': {rm_err_msg}");
-                            }
-                        }
-
-                        if let Err(e) = fs::remove_file(repo_path.join(file_path)) {
-                            if e.kind() != std::io::ErrorKind::NotFound {
-                                log::warn!(
-                                    "Failed to remove file '{file_path}' from filesystem: {e}"
-                                );
-                            }
-                        }
-                    }
-                    Ok(())
-                } else {
-                    Err(err)
-                }
-            }
-        }
+        crate::source_control::git_ops::git_restore_and_clean(repo_path, relative_paths, branch)
+            .await
     }
 
     /// Removes files based on the operation type

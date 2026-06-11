@@ -75,6 +75,8 @@ mod search_bar;
 mod server;
 mod session_management;
 mod shell_indicator;
+#[allow(dead_code)]
+mod source_control;
 mod suggestions;
 mod system;
 mod tab;
@@ -1628,6 +1630,11 @@ pub(crate) fn initialize_app(
     {
         use code_review::git_status_update::GitStatusUpdateModel;
         ctx.add_singleton_model(|_| GitStatusUpdateModel::new());
+    }
+
+    {
+        use source_control::SourceControlCacheModel;
+        ctx.add_singleton_model(|_| SourceControlCacheModel::new());
     }
 
     ctx.add_singleton_model(|ctx| {
