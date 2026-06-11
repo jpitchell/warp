@@ -14,6 +14,7 @@ use warpui::elements::{
 };
 use warpui::fonts::{Properties, Weight};
 use warpui::platform::Cursor;
+use warpui::ui_components::components::UiComponent;
 use warpui::AppContext;
 
 use super::view::SourceControlViewAction;
@@ -117,7 +118,7 @@ pub fn build_list_items(
         None => (&empty, &empty, &empty, &empty),
     };
 
-    let mut push_file_section = |items: &mut Vec<SourceControlListItem>,
+    let push_file_section = |items: &mut Vec<SourceControlListItem>,
                                  section: Section,
                                  changes: &[FileChange]| {
         items.push(SourceControlListItem::SectionHeader {
@@ -605,14 +606,16 @@ pub fn render_worktree_row(
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| worktree.path.display().to_string());
     let home_dir = dirs::home_dir().and_then(|p| p.to_str().map(String::from));
-    let display_path = warp_util::path::user_friendly_path(&worktree.path, home_dir.as_deref());
+    let path_str = worktree.path.display().to_string();
+    let display_path =
+        warp_util::path::user_friendly_path(&path_str, home_dir.as_deref()).into_owned();
     let mut sub_parts = Vec::new();
     if let Some(branch) = &worktree.branch {
         sub_parts.push(branch.clone());
     } else {
         sub_parts.push(format!("detached @ {}", short_head(&worktree.head)));
     }
-    sub_parts.push(display_path.into_owned());
+    sub_parts.push(display_path);
 
     let leading = ConstrainedBox::new(
         Icon::Dataflow02

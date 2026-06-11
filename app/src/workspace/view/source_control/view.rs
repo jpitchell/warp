@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use warpui::elements::{
-    CrossAxisAlignment, Element, Flex, MainAxisAlignment, MainAxisSize, MouseStateHandle,
-    ParentElement, ScrollStateHandle, Text, UniformListState,
+    CrossAxisAlignment, Element, Flex, MainAxisAlignment, MainAxisSize, ParentElement,
+    ScrollStateHandle, Text, UniformListState,
 };
 use warpui::fonts::{Properties, Weight};
 use warpui::{
@@ -43,12 +43,14 @@ use {
     },
     crate::workspaces::user_workspaces::UserWorkspaces,
     repo_metadata::repositories::DetectedRepositories,
+    settings::Setting as _,
     warp_core::send_telemetry_from_ctx,
     warp_core::ui::Icon,
     warpui::elements::{
         AnchorPair, ChildAnchor, ChildView, Fill, OffsetPositioning, OffsetType, ParentAnchor,
         ParentOffsetBounds, PositionedElementOffsetBounds, PositioningAxis, SavePosition,
-        Scrollable, ScrollbarWidth, Shrinkable, Stack, UniformList, XAxisAnchor, YAxisAnchor,
+        Scrollable, ScrollableElement, ScrollbarWidth, Shrinkable, Stack, UniformList,
+        XAxisAnchor, YAxisAnchor,
     },
     warpui::keymap::macros::*,
     warpui::keymap::FixedBinding,
@@ -146,7 +148,6 @@ pub struct SourceControlView {
     item_states: HashMap<String, ItemState>,
     list_state: UniformListState,
     scroll_state: ScrollStateHandle,
-    list_hover: MouseStateHandle,
     header: HeaderState,
     commit_box: CommitBoxState,
     dialog: DialogState,
@@ -225,7 +226,6 @@ impl SourceControlView {
             item_states: HashMap::new(),
             list_state: UniformListState::new(),
             scroll_state: Arc::new(Mutex::new(Default::default())),
-            list_hover: MouseStateHandle::default(),
             header,
             commit_box,
             dialog,
@@ -1376,13 +1376,13 @@ fn render_empty_state(title: &str, subtitle: &str, app: &AppContext) -> Box<dyn 
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
         .with_spacing(4.)
         .with_child(
-            Text::new(title, appearance.ui_font_family(), 14.)
+            Text::new(title.to_string(), appearance.ui_font_family(), 14.)
                 .with_color(theme.main_text_color(theme.background()).into_solid())
                 .with_style(Properties::default().weight(Weight::Semibold))
                 .finish(),
         )
         .with_child(
-            Text::new(subtitle, appearance.ui_font_family(), 14.)
+            Text::new(subtitle.to_string(), appearance.ui_font_family(), 14.)
                 .with_color(theme.disabled_ui_text_color().into_solid())
                 .finish(),
         )

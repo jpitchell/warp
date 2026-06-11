@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use warpui::elements::{
     ChildView, Container, CrossAxisAlignment, Element, Flex, ParentElement,
 };
+use warpui::ui_components::components::{UiComponent, UiComponentStyles};
 use warpui::{AppContext, ViewContext, ViewHandle};
 
 use super::item::Section;
@@ -40,15 +41,15 @@ pub enum ActiveDialog {
 /// View-state for the panel's dialogs. The inputs / buttons are persistent
 /// child views re-configured each time a dialog opens.
 pub struct DialogState {
-    pub active: Option<ActiveDialog>,
+    pub(super) active: Option<ActiveDialog>,
     /// Branch name (create-branch / add-worktree) or stash message.
-    pub name_input: ViewHandle<SubmittableTextInput>,
+    pub(super) name_input: ViewHandle<SubmittableTextInput>,
     /// Worktree path (add-worktree only).
-    pub path_input: ViewHandle<SubmittableTextInput>,
+    pub(super) path_input: ViewHandle<SubmittableTextInput>,
     /// Existing-branch picker for add-worktree.
-    pub branch_dropdown: ViewHandle<FilterableDropdown<SourceControlViewAction>>,
+    pub(super) branch_dropdown: ViewHandle<FilterableDropdown<SourceControlViewAction>>,
     /// The branch picked in `branch_dropdown` (used when `name_input` is empty).
-    pub selected_worktree_branch: Option<String>,
+    pub(super) selected_worktree_branch: Option<String>,
     cancel_button: ViewHandle<ActionButton>,
     confirm_button: ViewHandle<ActionButton>,
     alt_button: ViewHandle<ActionButton>,

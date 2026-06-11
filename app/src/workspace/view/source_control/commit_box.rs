@@ -10,7 +10,7 @@ use warpui::elements::{
 };
 use warpui::platform::Cursor;
 use warpui::ui_components::components::{UiComponent, UiComponentStyles};
-use warpui::{AppContext, ViewContext, ViewHandle};
+use warpui::{AppContext, SingletonEntity, ViewContext, ViewHandle};
 
 use super::view::{SourceControlView, SourceControlViewAction};
 use crate::appearance::Appearance;

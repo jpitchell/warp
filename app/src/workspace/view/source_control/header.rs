@@ -7,6 +7,7 @@ use warpui::elements::{
     MouseStateHandle, ParentElement, Shrinkable, Text,
 };
 use warpui::platform::Cursor;
+use warpui::ui_components::components::UiComponent;
 use warpui::{AppContext, ViewContext, ViewHandle};
 
 use super::view::{SourceControlView, SourceControlViewAction};
@@ -57,7 +58,7 @@ impl SyncIntent {
 
 /// View-state for the header row.
 pub struct HeaderState {
-    pub branch_dropdown: ViewHandle<FilterableDropdown<SourceControlViewAction>>,
+    pub(super) branch_dropdown: ViewHandle<FilterableDropdown<SourceControlViewAction>>,
     sync_button_state: MouseStateHandle,
     refresh_button_state: MouseStateHandle,
 }
