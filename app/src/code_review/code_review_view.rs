@@ -2612,10 +2612,13 @@ impl CodeReviewView {
     /// the diff hasn't loaded yet, the selection is deferred until it does.
     /// Used by the Source Control panel's open-diff action.
     pub fn select_file_by_path(&mut self, path: &str, ctx: &mut ViewContext<Self>) {
-        let file_index = self.active_repo.as_ref().and_then(|repo| match &repo.state {
-            CodeReviewViewState::Loaded(state) => state.file_states.get_index_of(path),
-            _ => None,
-        });
+        let file_index = self
+            .active_repo
+            .as_ref()
+            .and_then(|repo| match &repo.state {
+                CodeReviewViewState::Loaded(state) => state.file_states.get_index_of(path),
+                _ => None,
+            });
         let Some(index) = file_index else {
             self.pending_file_selection = Some(path.to_string());
             return;

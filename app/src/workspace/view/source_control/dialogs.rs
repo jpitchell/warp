@@ -5,9 +5,7 @@
 
 use std::path::PathBuf;
 
-use warpui::elements::{
-    ChildView, Container, CrossAxisAlignment, Element, Flex, ParentElement,
-};
+use warpui::elements::{ChildView, Container, CrossAxisAlignment, Element, Flex, ParentElement};
 use warpui::ui_components::components::{UiComponent, UiComponentStyles};
 use warpui::{AppContext, ViewContext, ViewHandle};
 
@@ -21,9 +19,7 @@ use crate::util::git::BranchEntry;
 use crate::view_components::action_button::{
     ActionButton, ButtonSize, DangerPrimaryTheme, NakedTheme, PrimaryTheme,
 };
-use crate::view_components::{
-    DropdownAction, FilterableDropdown, SubmittableTextInput,
-};
+use crate::view_components::{DropdownAction, FilterableDropdown, SubmittableTextInput};
 
 const DIALOG_WIDTH: f32 = 360.;
 
@@ -33,9 +29,14 @@ pub enum ActiveDialog {
     CreateBranch,
     StashPush,
     AddWorktree,
-    ConfirmDiscardFile { section: Section, change: FileChange },
+    ConfirmDiscardFile {
+        section: Section,
+        change: FileChange,
+    },
     ConfirmDiscardAll,
-    ConfirmRemoveWorktree { path: PathBuf },
+    ConfirmRemoveWorktree {
+        path: PathBuf,
+    },
 }
 
 /// View-state for the panel's dialogs. The inputs / buttons are persistent

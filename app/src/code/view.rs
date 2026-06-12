@@ -1204,7 +1204,10 @@ impl CodeView {
     }
 
     fn remove_tab_data_index(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
-        let closed_location = self.tab_group.get(index).and_then(|t| t.location().cloned());
+        let closed_location = self
+            .tab_group
+            .get(index)
+            .and_then(|t| t.location().cloned());
         self.tab_group.remove(index);
         GlobalBufferModel::handle(ctx).update(ctx, |model, ctx| {
             model.remove_deallocated_buffers(ctx);

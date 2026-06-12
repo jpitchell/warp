@@ -57,16 +57,13 @@ pub enum GitOpKind {
 }
 
 /// The mutating-operation state machine. At most one mutating op runs at a time.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum OperationState {
+    #[default]
     Idle,
-    Running { kind: GitOpKind },
-}
-
-impl Default for OperationState {
-    fn default() -> Self {
-        Self::Idle
-    }
+    Running {
+        kind: GitOpKind,
+    },
 }
 
 /// Events emitted by [`SourceControlModel`].

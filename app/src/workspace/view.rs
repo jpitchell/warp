@@ -6258,9 +6258,10 @@ impl Workspace {
                 // Same execution path as the prompt git-branch chip, so the
                 // `cd` is quoted for the active session's shell and any typed
                 // input is restored after the command completes.
-                let command = crate::context_chips::display_chip::PromptChipShellCommand::ChangeDirectory {
-                    dir_name: path_str.to_string(),
-                };
+                let command =
+                    crate::context_chips::display_chip::PromptChipShellCommand::ChangeDirectory {
+                        dir_name: path_str.to_string(),
+                    };
                 input_handle.update(ctx, |input, ctx| {
                     input.try_execute_prompt_chip_command(&command, ctx);
                     ctx.notify();

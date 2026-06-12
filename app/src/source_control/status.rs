@@ -161,7 +161,7 @@ fn parse_branch_header(header: &str, branch: &mut BranchStatus) {
 /// and the rename (`2`) record inserts `<X><score>` before the path:
 /// `2 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <X><score> <path>`.
 /// Returns `(xy, path)`.
-fn split_record<'a>(record: &'a str, path_field_index: usize) -> Option<(&'a str, &'a str)> {
+fn split_record(record: &str, path_field_index: usize) -> Option<(&str, &str)> {
     let mut iter = record.splitn(path_field_index + 1, ' ');
     let _kind = iter.next()?;
     let xy = iter.next()?;

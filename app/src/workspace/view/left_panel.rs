@@ -111,7 +111,9 @@ pub enum LeftPanelEvent {
     /// Execute a `cd` in the active terminal (worktree-aware branch checkout
     /// from the Source Control panel).
     #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
-    ChangeDirectoryInActiveTerminal { path: PathBuf },
+    ChangeDirectoryInActiveTerminal {
+        path: PathBuf,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -868,11 +870,7 @@ impl LeftPanelView {
     }
 
     #[cfg(not(feature = "local_fs"))]
-    fn handle_source_control_event(
-        _event: &SourceControlViewEvent,
-        _ctx: &mut ViewContext<Self>,
-    ) {
-    }
+    fn handle_source_control_event(_event: &SourceControlViewEvent, _ctx: &mut ViewContext<Self>) {}
 
     #[cfg(feature = "local_fs")]
     fn handle_file_tree_event(&mut self, event: &FileTreeEvent, ctx: &mut ViewContext<Self>) {
