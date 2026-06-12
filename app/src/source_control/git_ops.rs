@@ -242,13 +242,15 @@ pub async fn unstage_all(repo_path: &Path) -> Result<()> {
         .map(|_| ())
 }
 
-/// Discards an untracked file (`git clean -f -- <path>`).
+/// Discards untracked paths (`git clean -fd -- <paths>`). `-d` is required
+/// because fully-untracked directories show up as a single `dir/` status
+/// entry, and `git clean` refuses to remove directories without it.
 #[cfg(feature = "local_fs")]
 pub async fn discard_untracked(repo_path: &Path, relative_paths: &[String]) -> Result<()> {
     if relative_paths.is_empty() {
         return Ok(());
     }
-    let mut args = vec!["clean", "-f", "--"];
+    let mut args = vec!["clean", "-fd", "--"];
     args.extend(relative_paths.iter().map(String::as_str));
     log::debug!(
         "[GIT OPERATION] git_ops.rs discard_untracked git {}",
@@ -393,12 +395,16 @@ pub async fn worktree_add(repo_path: &Path, path: &Path, branch: WorktreeBranch)
     let mut args = vec!["worktree".to_string(), "add".to_string()];
     match &branch {
         WorktreeBranch::Existing(name) => {
+            // `--` so a user-typed path starting with `-` can't be parsed as
+            // a flag.
+            args.push("--".to_string());
             args.push(path_str);
             args.push(name.clone());
         }
         WorktreeBranch::New { name, base } => {
             args.push("-b".to_string());
             args.push(name.clone());
+            args.push("--".to_string());
             args.push(path_str);
             if let Some(base) = base {
                 args.push(base.clone());

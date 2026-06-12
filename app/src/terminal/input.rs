@@ -5893,23 +5893,7 @@ impl Input {
                 });
             }
             PromptDisplayEvent::TryExecuteCommand(command) => {
-                let Some(shell_type) = self
-                    .active_session(ctx)
-                    .map(|session| session.shell().shell_type())
-                else {
-                    log::warn!("Tried to execute prompt chip command without an active session");
-                    return;
-                };
-                let command = render_prompt_chip_shell_command(command, shell_type);
-                // Snapshot the current input so we can restore it after the command completes.
-                let current_input = self.buffer_text(ctx);
-                if self.try_execute_command_from_source(&command, CommandExecutionSource::User, ctx)
-                {
-                    self.cancel_active_conversation(ctx, CancellationReason::UserCommandExecuted);
-                    if !current_input.is_empty() {
-                        self.input_contents_before_prompt_chip_command = Some(current_input);
-                    }
-                }
+                self.try_execute_prompt_chip_command(command, ctx);
             }
             PromptDisplayEvent::OpenAIDocument {
                 document_id,
@@ -6966,6 +6950,33 @@ impl Input {
 
     pub fn try_execute_command(&mut self, command: &str, ctx: &mut ViewContext<Self>) -> bool {
         self.try_execute_command_with_options(command, false, ctx)
+    }
+
+    /// Renders `command` for the active session's shell (so quoting is
+    /// shell-aware) and executes it, snapshotting any typed input so it can be
+    /// restored once the command completes. Used by the prompt context chips
+    /// and the Source Control panel's worktree `cd`.
+    pub fn try_execute_prompt_chip_command(
+        &mut self,
+        command: &PromptChipShellCommand,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(shell_type) = self
+            .active_session(ctx)
+            .map(|session| session.shell().shell_type())
+        else {
+            log::warn!("Tried to execute prompt chip command without an active session");
+            return;
+        };
+        let command = render_prompt_chip_shell_command(command, shell_type);
+        // Snapshot the current input so we can restore it after the command completes.
+        let current_input = self.buffer_text(ctx);
+        if self.try_execute_command_from_source(&command, CommandExecutionSource::User, ctx) {
+            self.cancel_active_conversation(ctx, CancellationReason::UserCommandExecuted);
+            if !current_input.is_empty() {
+                self.input_contents_before_prompt_chip_command = Some(current_input);
+            }
+        }
     }
 
     fn try_execute_command_with_options(

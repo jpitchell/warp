@@ -44,6 +44,7 @@ use {
     crate::workspaces::user_workspaces::UserWorkspaces,
     repo_metadata::repositories::DetectedRepositories,
     settings::Setting as _,
+    warp_core::features::FeatureFlag,
     warp_core::send_telemetry_from_ctx,
     warp_core::ui::Icon,
     warpui::elements::{
@@ -145,7 +146,12 @@ pub struct SourceControlView {
     list_items: Arc<Vec<SourceControlListItem>>,
     collapsed_sections: HashSet<Section>,
     selected_index: Option<usize>,
-    item_states: HashMap<String, ItemState>,
+    /// `Arc` so the render closure can capture it without cloning the map.
+    item_states: Arc<HashMap<String, ItemState>>,
+    /// Repo models this view has already subscribed to. Subscriptions can't
+    /// be torn down, so this prevents piling up duplicates (and double event
+    /// handling) when the active directory bounces between repos.
+    subscribed_repo_models: HashSet<warpui::EntityId>,
     list_state: UniformListState,
     scroll_state: ScrollStateHandle,
     header: HeaderState,
@@ -223,7 +229,8 @@ impl SourceControlView {
             list_items: Arc::new(Vec::new()),
             collapsed_sections,
             selected_index: None,
-            item_states: HashMap::new(),
+            item_states: Arc::new(HashMap::new()),
+            subscribed_repo_models: HashSet::new(),
             list_state: UniformListState::new(),
             scroll_state: Arc::new(Mutex::new(Default::default())),
             header,
@@ -252,6 +259,12 @@ impl SourceControlView {
         directory: Option<LocalOrRemotePath>,
         ctx: &mut ViewContext<Self>,
     ) {
+        // The left panel forwards every directory change here regardless of
+        // the feature flag; don't spin up repo models (git status + watcher)
+        // for users who can't see the panel.
+        if !FeatureFlag::SourceControlPanel.is_enabled() {
+            return;
+        }
         let new_target = match directory {
             None => RepoTarget::None,
             Some(LocalOrRemotePath::Remote(_)) => RepoTarget::RemoteUnsupported,
@@ -297,17 +310,21 @@ impl SourceControlView {
                 m.set_history_enabled(history_enabled, ctx);
                 m.set_worktree_details_enabled(worktree_details, ctx);
             });
-            // Subscriptions to previously tracked models stay alive while
-            // another window keeps the model cached, so guard against stale
-            // events by checking the emitting model is still ours.
+            // Subscriptions can't be torn down and stay alive while anything
+            // keeps the model cached, so (a) never subscribe to the same
+            // model twice — switching A→B→A would otherwise handle every
+            // event twice — and (b) guard against stale events by checking
+            // the emitting model is still ours.
             let model_id = model.id();
-            ctx.subscribe_to_model(&model, move |me, _, event, ctx| {
-                let is_current =
-                    matches!(&me.repo, RepoTarget::Local(current) if current.id() == model_id);
-                if is_current {
-                    me.handle_model_event(event, ctx);
-                }
-            });
+            if self.subscribed_repo_models.insert(model_id) {
+                ctx.subscribe_to_model(&model, move |me, _, event, ctx| {
+                    let is_current =
+                        matches!(&me.repo, RepoTarget::Local(current) if current.id() == model_id);
+                    if is_current {
+                        me.handle_model_event(event, ctx);
+                    }
+                });
+            }
         }
 
         self.rebuild_list_items(ctx);
@@ -404,11 +421,18 @@ impl SourceControlView {
             _ => Vec::new(),
         };
 
-        let keys: HashSet<String> = items.iter().map(|item| item.state_key()).collect();
-        self.item_states.retain(|key, _| keys.contains(key));
-        for key in keys {
-            self.item_states.entry(key).or_default();
-        }
+        // Rebuild the per-item mouse-state map, carrying over state for keys
+        // that survived so hover handles stay stable across rebuilds.
+        self.item_states = Arc::new(
+            items
+                .iter()
+                .map(|item| {
+                    let key = item.state_key();
+                    let state = self.item_states.get(&key).cloned().unwrap_or_default();
+                    (key, state)
+                })
+                .collect::<HashMap<_, _>>(),
+        );
         self.list_items = Arc::new(items);
 
         // Clamp / fix the selection.

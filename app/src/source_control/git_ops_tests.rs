@@ -116,6 +116,23 @@ async fn discard_untracked_removes_file() {
 
 #[cfg(feature = "local_fs")]
 #[tokio::test]
+async fn discard_untracked_removes_directory() {
+    let (_dir, repo) = init_repo().await;
+    // A fully-untracked directory is reported by `git status` as a single
+    // `dir/` entry; discarding it must remove the directory (`clean -d`).
+    write(&repo, "newdir/junk.txt", "junk\n");
+    let st = status(&repo).await;
+    assert_eq!(st.untracked.len(), 1);
+    assert_eq!(st.untracked[0].path, "newdir/");
+
+    discard_untracked(&repo, &["newdir/".to_string()])
+        .await
+        .unwrap();
+    assert!(!repo.join("newdir").exists());
+}
+
+#[cfg(feature = "local_fs")]
+#[tokio::test]
 async fn git_restore_and_clean_reverts_changes() {
     let (_dir, repo) = init_repo().await;
     write(&repo, "tracked.txt", "modified\n");

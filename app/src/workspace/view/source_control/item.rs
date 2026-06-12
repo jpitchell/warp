@@ -672,11 +672,9 @@ pub fn render_worktree_row(
 }
 
 fn short_head(head: &str) -> &str {
-    if head.len() > 7 {
-        &head[..7]
-    } else {
-        head
-    }
+    // `get` rather than indexing: `head` is normally an ASCII sha, but this
+    // must not panic on a non-char-boundary byte if it ever isn't.
+    head.get(..7).unwrap_or(head)
 }
 
 /// Renders a commit row: unpushed marker, subject + `author · time` sublabel,
