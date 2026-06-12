@@ -3,30 +3,33 @@
 
 use warp_core::ui::Icon;
 use warpui::elements::{
-    ChildView, ConstrainedBox, Container, CrossAxisAlignment, Element, Flex, MainAxisSize,
-    MouseStateHandle, ParentElement, Shrinkable, Text,
+    ChildView, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Element, Flex,
+    MainAxisSize, MouseStateHandle, ParentElement, Radius, SavePosition, Shrinkable, Text,
 };
 use warpui::platform::Cursor;
-use warpui::ui_components::components::UiComponent;
+use warpui::ui_components::button::Button;
+use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
 use warpui::{AppContext, ViewContext, ViewHandle};
 
 use super::view::{SourceControlView, SourceControlViewAction};
 use crate::appearance::Appearance;
-use crate::menu::{MenuItem, MenuItemFields};
+use crate::menu::{Menu, MenuItem, MenuItemFields};
 use crate::source_control::{BranchStatus, WorktreeEntry};
 use crate::ui_components::buttons::icon_button_with_color;
 use crate::util::git::BranchEntry;
 use crate::view_components::{DropdownAction, FilterableDropdown};
 
 const BRANCH_MENU_WIDTH: f32 = 260.;
+const SYNC_MENU_WIDTH: f32 = 160.;
 
 /// What pressing the sync button would do given the current branch state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SyncIntent {
     /// No upstream — push with `--set-upstream`.
     Publish,
-    /// Behind the upstream — pull (then push if also ahead).
-    PullThenPush,
+    /// Behind the upstream — pull only. When also ahead, "Pull, then push"
+    /// is offered through the sync menu rather than being the default.
+    Pull,
     /// Ahead only — push.
     Push,
     /// Nothing to sync.
@@ -38,7 +41,7 @@ impl SyncIntent {
         if branch.upstream.is_none() {
             Self::Publish
         } else if branch.behind > 0 {
-            Self::PullThenPush
+            Self::Pull
         } else if branch.ahead > 0 {
             Self::Push
         } else {
@@ -49,9 +52,16 @@ impl SyncIntent {
     fn tooltip(&self) -> &'static str {
         match self {
             Self::Publish => "Publish branch",
-            Self::PullThenPush => "Pull, then push",
+            Self::Pull => "Pull",
             Self::Push => "Push changes",
             Self::UpToDate => "Up to date",
+        }
+    }
+
+    fn click_action(&self) -> SourceControlViewAction {
+        match self {
+            Self::Pull => SourceControlViewAction::Pull,
+            _ => SourceControlViewAction::Sync,
         }
     }
 }
@@ -59,7 +69,13 @@ impl SyncIntent {
 /// View-state for the header row.
 pub struct HeaderState {
     pub(super) branch_dropdown: ViewHandle<FilterableDropdown<SourceControlViewAction>>,
+    /// Menu behind the sync chevron ("Pull" / "Pull, then push"), shown only
+    /// when the branch is both behind and ahead.
+    pub(super) sync_menu: ViewHandle<Menu<SourceControlViewAction>>,
+    pub(super) sync_menu_open: bool,
+    pub(super) sync_save_position_id: String,
     sync_button_state: MouseStateHandle,
+    sync_menu_button_state: MouseStateHandle,
     refresh_button_state: MouseStateHandle,
 }
 
@@ -68,13 +84,38 @@ impl HeaderState {
         let branch_dropdown = ctx.add_typed_action_view(|ctx| {
             let mut dropdown = FilterableDropdown::new(ctx);
             dropdown.set_menu_width(BRANCH_MENU_WIDTH, ctx);
-            dropdown.set_menu_header_to_static("Switch branch");
+            // The closed trigger shows the current branch (set via
+            // `refresh_branch_items`); this only covers the pre-load state.
+            dropdown.set_closed_label_fallback("Loading\u{2026}");
             dropdown.set_use_overlay_layer(true, ctx);
             dropdown
         });
+
+        let sync_menu = ctx.add_typed_action_view(|ctx| {
+            let mut menu = Menu::new()
+                .prevent_interaction_with_other_elements()
+                .with_width(SYNC_MENU_WIDTH);
+            menu.set_items(
+                vec![
+                    MenuItemFields::new("Pull")
+                        .with_on_select_action(SourceControlViewAction::Pull)
+                        .into_item(),
+                    MenuItemFields::new("Pull, then push")
+                        .with_on_select_action(SourceControlViewAction::Sync)
+                        .into_item(),
+                ],
+                ctx,
+            );
+            menu
+        });
+
         Self {
             branch_dropdown,
+            sync_menu,
+            sync_menu_open: false,
+            sync_save_position_id: format!("source_control_sync_button_{}", ctx.view_id()),
             sync_button_state: MouseStateHandle::default(),
+            sync_menu_button_state: MouseStateHandle::default(),
             refresh_button_state: MouseStateHandle::default(),
         }
     }
@@ -87,6 +128,7 @@ impl HeaderState {
         branches: &[BranchEntry],
         worktrees: &[WorktreeEntry],
         current_branch: Option<&str>,
+        detached: bool,
         ctx: &mut ViewContext<SourceControlView>,
     ) {
         let mut items: Vec<MenuItem<DropdownAction>> = Vec::new();
@@ -134,9 +176,19 @@ impl HeaderState {
 
         self.branch_dropdown.update(ctx, |dropdown, ctx| {
             dropdown.set_rich_items(items, ctx);
-            if let Some(current) = current_branch {
-                dropdown.set_selected_by_name(current, ctx);
-            }
+            // The closed trigger's label comes entirely from the fallback —
+            // the current item is deliberately never *selected* in the menu,
+            // since selection paints a persistent highlight row that clashes
+            // with hover highlighting. The ✓ icon marks the current branch
+            // instead.
+            let label = if detached {
+                "Detached HEAD".to_string()
+            } else {
+                current_branch.unwrap_or("Select branch").to_string()
+            };
+            dropdown.set_closed_label_fallback(label);
+            // Clears any selection (no item has an empty name).
+            dropdown.set_selected_by_name("", ctx);
         });
     }
 
@@ -160,63 +212,126 @@ impl HeaderState {
                 Shrinkable::new(1.0, ChildView::new(&self.branch_dropdown).finish()).finish(),
             );
 
+        // The sync button carries its own pull/push counts (`↓7 ↑2`) so the
+        // numbers are visually bound to the action; it disappears entirely
+        // when there's nothing to sync. Publish (no upstream) shows an
+        // upload-cloud icon instead, keeping `Refresh` below as the only
+        // circular-arrow icon in the header.
         if let Some(branch) = branch {
-            if branch.ahead > 0 || branch.behind > 0 {
-                let mut counters = Flex::row()
+            let intent = SyncIntent::from_branch(branch);
+            if intent != SyncIntent::UpToDate {
+                let tooltip = ui_builder.tool_tip(intent.tooltip().to_string()).build();
+                let mut sync_button = match intent {
+                    SyncIntent::Publish => icon_button_with_color(
+                        appearance,
+                        Icon::UploadCloud,
+                        false,
+                        self.sync_button_state.clone(),
+                        theme.sub_text_color(theme.background()),
+                    ),
+                    _ => {
+                        // Pull count first to match the action order.
+                        let count_font_size = appearance.ui_font_size() - 1.;
+                        let mut counters = Flex::row()
+                            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                            .with_main_axis_size(MainAxisSize::Min)
+                            .with_spacing(4.);
+                        if branch.behind > 0 {
+                            counters.add_child(
+                                Text::new_inline(
+                                    format!("\u{2193}{}", branch.behind),
+                                    font,
+                                    count_font_size,
+                                )
+                                .with_color(theme.ansi_fg_yellow())
+                                .finish(),
+                            );
+                        }
+                        if branch.ahead > 0 {
+                            counters.add_child(
+                                Text::new_inline(
+                                    format!("\u{2191}{}", branch.ahead),
+                                    font,
+                                    count_font_size,
+                                )
+                                .with_color(theme.ansi_fg_green())
+                                .finish(),
+                            );
+                        }
+                        let pill_styles = || {
+                            UiComponentStyles::default()
+                                .set_height(22.)
+                                .set_border_width(0.)
+                                .set_padding(Coords {
+                                    top: 3.,
+                                    bottom: 3.,
+                                    left: 6.,
+                                    right: 6.,
+                                })
+                                .set_border_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+                        };
+                        Button::new(
+                            self.sync_button_state.clone(),
+                            pill_styles(),
+                            Some(pill_styles().set_background(theme.surface_2().into())),
+                            Some(pill_styles().set_background(theme.surface_3().into())),
+                            Some(pill_styles()),
+                        )
+                        .with_custom_label(counters.finish())
+                    }
+                };
+                sync_button = sync_button.with_tooltip(move || tooltip.finish());
+                let mut sync_button = sync_button.build();
+                if !busy {
+                    let click_action = intent.click_action();
+                    sync_button = sync_button
+                        .on_click(move |ctx, _, _| {
+                            ctx.dispatch_typed_action(click_action.clone());
+                        })
+                        .with_cursor(Cursor::PointingHand);
+                }
+                let mut sync_row = Flex::row()
                     .with_cross_axis_alignment(CrossAxisAlignment::Center)
                     .with_main_axis_size(MainAxisSize::Min)
-                    .with_spacing(4.);
-                if branch.ahead > 0 {
-                    counters.add_child(
-                        Text::new_inline(
-                            format!("\u{2191}{}", branch.ahead),
-                            font,
-                            appearance.ui_font_size() - 1.,
-                        )
-                        .with_color(theme.ansi_fg_green().into())
-                        .finish(),
+                    .with_spacing(2.)
+                    .with_child(
+                        ConstrainedBox::new(sync_button.finish())
+                            .with_height(22.)
+                            .finish(),
                     );
-                }
-                if branch.behind > 0 {
-                    counters.add_child(
-                        Text::new_inline(
-                            format!("\u{2193}{}", branch.behind),
-                            font,
-                            appearance.ui_font_size() - 1.,
-                        )
-                        .with_color(theme.ansi_fg_yellow().into())
-                        .finish(),
-                    );
-                }
-                row.add_child(counters.finish());
-            }
 
-            let intent = SyncIntent::from_branch(branch);
-            let sync_enabled = !busy && intent != SyncIntent::UpToDate;
-            let icon_color = theme.sub_text_color(theme.background());
-            let tooltip = ui_builder.tool_tip(intent.tooltip().to_string()).build();
-            let mut sync_button = icon_button_with_color(
-                appearance,
-                Icon::RefreshCcw,
-                false,
-                self.sync_button_state.clone(),
-                icon_color,
-            )
-            .with_tooltip(move || tooltip.finish())
-            .build();
-            if sync_enabled {
-                sync_button = sync_button
-                    .on_click(|ctx, _, _| {
-                        ctx.dispatch_typed_action(SourceControlViewAction::Sync);
-                    })
-                    .with_cursor(Cursor::PointingHand);
+                // Both behind and ahead: the default click pulls only, so a
+                // chevron offers "Pull, then push" as the explicit option.
+                if intent == SyncIntent::Pull && branch.ahead > 0 {
+                    let menu_tooltip = ui_builder.tool_tip("Sync options".to_string()).build();
+                    let mut menu_button = icon_button_with_color(
+                        appearance,
+                        Icon::ChevronDown,
+                        false,
+                        self.sync_menu_button_state.clone(),
+                        theme.sub_text_color(theme.background()),
+                    )
+                    .with_tooltip(move || menu_tooltip.finish())
+                    .build();
+                    if !busy {
+                        menu_button = menu_button
+                            .on_click(|ctx, _, _| {
+                                ctx.dispatch_typed_action(SourceControlViewAction::ToggleSyncMenu);
+                            })
+                            .with_cursor(Cursor::PointingHand);
+                    }
+                    sync_row.add_child(
+                        ConstrainedBox::new(menu_button.finish())
+                            .with_width(16.)
+                            .with_height(22.)
+                            .finish(),
+                    );
+                }
+
+                row.add_child(
+                    SavePosition::new(sync_row.finish(), &self.sync_save_position_id).finish(),
+                );
             }
-            row.add_child(
-                ConstrainedBox::new(sync_button.finish())
-                    .with_width(22.)
-                    .with_height(22.)
-                    .finish(),
-            );
         }
 
         let icon_color = theme.sub_text_color(theme.background());

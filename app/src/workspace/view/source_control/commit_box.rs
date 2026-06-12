@@ -117,7 +117,11 @@ impl CommitBoxState {
         (!trimmed.is_empty()).then(|| trimmed.to_string())
     }
 
-    pub(super) fn set_generating(&mut self, generating: bool, ctx: &mut ViewContext<SourceControlView>) {
+    pub(super) fn set_generating(
+        &mut self,
+        generating: bool,
+        ctx: &mut ViewContext<SourceControlView>,
+    ) {
         self.generating = generating;
         let placeholder = if generating {
             GENERATING_PLACEHOLDER_TEXT
@@ -139,12 +143,22 @@ impl CommitBoxState {
             .message_editor
             .as_ref(app)
             .line_height(app.font_cache(), appearance);
+        // A single line while idle and empty; full height once focused or a
+        // message is being written, so the file list keeps the spare room.
+        let expanded =
+            self.message_editor.is_focused(app) || self.message(app).is_some() || self.generating;
+        // The default text_input styles add 10px vertical padding each side.
+        let height = if expanded {
+            EDITOR_MIN_HEIGHT.max(line_height * 3.)
+        } else {
+            line_height + 20.
+        };
         let editor_element = ui_builder
             .text_input(self.message_editor.clone())
             .with_style(UiComponentStyles {
                 border_color: Some(theme.surface_3().into()),
                 border_radius: Some(CornerRadius::with_all(Radius::Pixels(6.))),
-                height: Some(EDITOR_MIN_HEIGHT.max(line_height * 3.)),
+                height: Some(height),
                 ..Default::default()
             })
             .build()

@@ -14,6 +14,7 @@ use warpui::elements::{
 };
 use warpui::fonts::{Properties, Weight};
 use warpui::platform::Cursor;
+use warpui::text_layout::ClipConfig;
 use warpui::ui_components::components::UiComponent;
 use warpui::AppContext;
 
@@ -66,12 +67,21 @@ impl Section {
 /// One row of the panel's uniform list.
 #[derive(Clone, Debug)]
 pub enum SourceControlListItem {
-    SectionHeader { section: Section, count: usize },
-    File { section: Section, change: FileChange },
+    SectionHeader {
+        section: Section,
+        count: usize,
+    },
+    File {
+        section: Section,
+        change: FileChange,
+    },
     Stash(StashEntry),
     Worktree(WorktreeEntry),
     Commit(CommitEntry),
-    EmptyHint { section: Section, text: &'static str },
+    EmptyHint {
+        section: Section,
+        text: &'static str,
+    },
 }
 
 impl SourceControlListItem {
@@ -118,28 +128,39 @@ pub fn build_list_items(
         None => (&empty, &empty, &empty, &empty),
     };
 
-    let push_file_section = |items: &mut Vec<SourceControlListItem>,
-                                 section: Section,
-                                 changes: &[FileChange]| {
-        items.push(SourceControlListItem::SectionHeader {
-            section,
-            count: changes.len(),
-        });
-        if !collapsed.contains(&section) {
-            items.extend(changes.iter().map(|change| SourceControlListItem::File {
+    let push_file_section =
+        |items: &mut Vec<SourceControlListItem>, section: Section, changes: &[FileChange]| {
+            items.push(SourceControlListItem::SectionHeader {
                 section,
-                change: change.clone(),
-            }));
-        }
-    };
+                count: changes.len(),
+            });
+            if !collapsed.contains(&section) {
+                items.extend(changes.iter().map(|change| SourceControlListItem::File {
+                    section,
+                    change: change.clone(),
+                }));
+            }
+        };
 
-    // Merge Conflicts only appears when there are conflicted files.
+    // Conflicts, Staged, and Untracked only appear when non-empty. Changes is
+    // always visible and gets an explicit hint when empty, so a clean tree
+    // can't be mistaken for a collapsed section.
     if !conflicted.is_empty() {
         push_file_section(&mut items, Section::Conflicts, conflicted);
     }
-    push_file_section(&mut items, Section::Staged, staged);
+    if !staged.is_empty() {
+        push_file_section(&mut items, Section::Staged, staged);
+    }
     push_file_section(&mut items, Section::Changes, unstaged);
-    push_file_section(&mut items, Section::Untracked, untracked);
+    if unstaged.is_empty() && !collapsed.contains(&Section::Changes) {
+        items.push(SourceControlListItem::EmptyHint {
+            section: Section::Changes,
+            text: "No changes",
+        });
+    }
+    if !untracked.is_empty() {
+        push_file_section(&mut items, Section::Untracked, untracked);
+    }
 
     items.push(SourceControlListItem::SectionHeader {
         section: Section::Stashes,
@@ -200,6 +221,9 @@ pub struct RowAction {
     pub icon: Icon,
     pub tooltip: &'static str,
     pub action: SourceControlViewAction,
+    /// Destructive actions (discard, drop, remove) render in the danger color
+    /// with extra separation from neighboring constructive actions.
+    pub danger: bool,
 }
 
 /// The single-character status indicator for a file change.
@@ -243,6 +267,20 @@ fn render_row_actions(
     for (ix, action) in actions.into_iter().enumerate().take(4) {
         let tooltip = ui_builder.tool_tip(action.tooltip.to_string()).build();
         let dispatched = action.action;
+        if action.danger && ix > 0 {
+            // Visually separate destructive actions from their neighbors to
+            // reduce misclicks.
+            row.add_child(
+                ConstrainedBox::new(warpui::elements::Empty::new().finish())
+                    .with_width(6.)
+                    .finish(),
+            );
+        }
+        let button_color = if action.danger {
+            theme.ansi_fg_red().into()
+        } else {
+            icon_color
+        };
         row.add_child(
             ConstrainedBox::new(
                 icon_button_with_color(
@@ -250,7 +288,7 @@ fn render_row_actions(
                     action.icon,
                     false,
                     state.actions[ix].clone(),
-                    icon_color,
+                    button_color,
                 )
                 .with_tooltip(move || tooltip.finish())
                 .build()
@@ -289,6 +327,9 @@ fn render_row_base(
     let mut row = Flex::row()
         .with_main_axis_size(MainAxisSize::Max)
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        // Right-aligns the hover actions, matching the section headers.
+        .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
+        .with_spacing(6.)
         .with_child(Shrinkable::new(1.0, content).finish());
     if let Some(actions_element) = actions_element {
         row.add_child(actions_element);
@@ -452,34 +493,41 @@ pub fn render_file_row(
     let font_size = appearance.ui_font_size();
 
     let letter = Text::new_inline(status_letter(&change.status), font, font_size - 1.)
-        .with_color(status_color(&change.status, appearance).into())
+        .with_color(status_color(&change.status, appearance))
         .with_style(Properties::default().weight(Weight::Bold))
         .finish();
 
     let (dir, file_name) = match change.path.rsplit_once('/') {
-        Some((dir, name)) => (Some(format!("{dir}/")), name.to_string()),
+        Some((dir, name)) => (Some(dir.to_string()), name.to_string()),
         None => (None, change.path.clone()),
     };
 
+    // Filename first so the scannable part stays left-aligned; the dimmed
+    // directory follows and is the first to shrink/ellipsize on narrow widths.
     let mut name_row = Flex::row()
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
-        .with_main_axis_size(MainAxisSize::Min);
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_spacing(6.);
+    name_row.add_child(
+        Text::new_inline(file_name, font, font_size)
+            .with_color(theme.main_text_color(theme.background()).into())
+            .with_clip(ClipConfig::ellipsis())
+            .soft_wrap(false)
+            .finish(),
+    );
     if let Some(dir) = dir {
         name_row.add_child(
             Shrinkable::new(
                 1.0,
                 Text::new_inline(dir, font, font_size)
                     .with_color(theme.sub_text_color(theme.background()).into())
+                    .with_clip(ClipConfig::ellipsis())
+                    .soft_wrap(false)
                     .finish(),
             )
             .finish(),
         );
     }
-    name_row.add_child(
-        Text::new_inline(file_name, font, font_size)
-            .with_color(theme.main_text_color(theme.background()).into())
-            .finish(),
-    );
 
     let content = Flex::row()
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
@@ -520,11 +568,15 @@ fn render_two_line_content(
         .with_child(
             Text::new_inline(top, font, font_size)
                 .with_color(theme.main_text_color(theme.background()).into())
+                .with_clip(ClipConfig::ellipsis())
+                .soft_wrap(false)
                 .finish(),
         )
         .with_child(
             Text::new_inline(sub, font, font_size - 2.)
                 .with_color(theme.sub_text_color(theme.background()).into())
+                .with_clip(ClipConfig::ellipsis())
+                .soft_wrap(false)
                 .finish(),
         )
         .finish();
@@ -629,28 +681,28 @@ pub fn render_worktree_row(
     let mut content_row = Flex::row()
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
         .with_spacing(6.)
-        .with_child(Shrinkable::new(
-            1.0,
-            render_two_line_content(
-                name,
-                sub_parts.join(" \u{b7} "),
-                Some(leading),
-                appearance,
-            ),
-        )
-        .finish());
+        .with_child(
+            Shrinkable::new(
+                1.0,
+                render_two_line_content(
+                    name,
+                    sub_parts.join(" \u{b7} "),
+                    Some(leading),
+                    appearance,
+                ),
+            )
+            .finish(),
+        );
 
     if worktree.is_current {
         content_row.add_child(
             Container::new(
-                Text::new_inline("current", font, appearance.ui_font_size() - 3.)
+                Text::new_inline("Current", font, appearance.ui_font_size() - 3.)
                     .with_color(theme.accent().into_solid())
                     .finish(),
             )
             .with_horizontal_padding(6.)
-            .with_background(warp_core::ui::theme::color::internal_colors::accent_overlay_1(
-                theme,
-            ))
+            .with_background(warp_core::ui::theme::color::internal_colors::accent_overlay_1(theme))
             .with_corner_radius(warpui::elements::CornerRadius::with_all(
                 warpui::elements::Radius::Pixels(4.),
             ))
@@ -694,7 +746,7 @@ pub fn render_commit_row(
 
     let marker: Box<dyn Element> = if commit.is_unpushed {
         Text::new_inline("\u{2191}", font, font_size - 1.)
-            .with_color(theme.ansi_fg_green().into())
+            .with_color(theme.ansi_fg_green())
             .finish()
     } else {
         warpui::elements::Empty::new().finish()

@@ -68,7 +68,7 @@ fn header_sections(items: &[SourceControlListItem]) -> Vec<Section> {
 }
 
 #[test]
-fn sections_are_ordered_and_conflicts_hidden_when_empty() {
+fn sections_are_ordered_and_empty_file_sections_hidden() {
     let status = status_with(vec![], vec![change("a.rs")], vec![change("b.rs")], vec![]);
     let items = build_list_items(
         Some(&status),
@@ -83,13 +83,51 @@ fn sections_are_ordered_and_conflicts_hidden_when_empty() {
         vec![
             Section::Staged,
             Section::Changes,
-            Section::Untracked,
             Section::Stashes,
             Section::Worktrees,
             Section::Commits,
         ],
-        "Conflicts header must be omitted when there are no conflicted files"
+        "Conflicts, Staged, and Untracked headers must be omitted when empty"
     );
+}
+
+#[test]
+fn clean_tree_shows_changes_header_with_empty_hint() {
+    let status = status_with(vec![], vec![], vec![], vec![]);
+    let items = build_list_items(Some(&status), &[], &[], &[], &HashSet::new());
+
+    assert_eq!(
+        header_sections(&items),
+        vec![
+            Section::Changes,
+            Section::Stashes,
+            Section::Worktrees,
+            Section::Commits,
+        ],
+        "only Changes stays visible on a clean tree"
+    );
+    assert!(
+        items.iter().any(|item| matches!(
+            item,
+            SourceControlListItem::EmptyHint {
+                section: Section::Changes,
+                ..
+            }
+        )),
+        "an empty Changes section must carry an explicit hint"
+    );
+
+    // Collapsing Changes suppresses the hint like any other child row.
+    let mut collapsed = HashSet::new();
+    collapsed.insert(Section::Changes);
+    let items = build_list_items(Some(&status), &[], &[], &[], &collapsed);
+    assert!(!items.iter().any(|item| matches!(
+        item,
+        SourceControlListItem::EmptyHint {
+            section: Section::Changes,
+            ..
+        }
+    )));
 }
 
 #[test]

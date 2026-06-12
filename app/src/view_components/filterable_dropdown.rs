@@ -55,6 +55,10 @@ pub struct FilterableDropdown<A: DropdownItemAction = ()> {
     items: Vec<MenuItem<DropdownAction>>,
     orientation: FilterableDropdownOrientation,
     static_menu_header: Option<&'static str>,
+    /// Shown on the closed top bar only when no item is selected (e.g. the
+    /// branch picker on a detached HEAD). Unlike `static_menu_header`, a
+    /// selection still replaces this label.
+    closed_label_fallback: Option<String>,
     button_variant: ButtonVariant,
     style_override: Option<UiComponentStyles>,
     hovered_style_override: Option<UiComponentStyles>,
@@ -126,6 +130,7 @@ where
             items: Default::default(),
             orientation: Default::default(),
             static_menu_header: None,
+            closed_label_fallback: None,
             button_variant: ButtonVariant::Outlined,
             style_override: None,
             hovered_style_override: None,
@@ -439,7 +444,7 @@ where
                     };
                     (text, fields.override_font_family())
                 }
-                _ => (String::new(), None),
+                _ => (self.closed_label_fallback.clone().unwrap_or_default(), None),
             },
         };
 
@@ -729,6 +734,11 @@ where
 
     pub fn set_menu_header_to_static(&mut self, header: &'static str) {
         self.static_menu_header = Some(header);
+    }
+
+    /// Sets the label shown on the closed top bar when no item is selected.
+    pub fn set_closed_label_fallback(&mut self, label: impl Into<String>) {
+        self.closed_label_fallback = Some(label.into());
     }
 }
 

@@ -42,7 +42,7 @@ use {
         git_ops, GitOpKind, OperationState, SourceControlCacheModel, SourceControlEvent,
     },
     crate::workspaces::user_workspaces::UserWorkspaces,
-    repo_metadata::repositories::DetectedRepositories,
+    repo_metadata::repositories::{DetectedRepositories, DetectedRepositoriesEvent},
     settings::Setting as _,
     warp_core::features::FeatureFlag,
     warp_core::send_telemetry_from_ctx,
@@ -50,8 +50,8 @@ use {
     warpui::elements::{
         AnchorPair, ChildAnchor, ChildView, Fill, OffsetPositioning, OffsetType, ParentAnchor,
         ParentOffsetBounds, PositionedElementOffsetBounds, PositioningAxis, SavePosition,
-        Scrollable, ScrollableElement, ScrollbarWidth, Shrinkable, Stack, UniformList,
-        XAxisAnchor, YAxisAnchor,
+        Scrollable, ScrollableElement, ScrollbarWidth, Shrinkable, Stack, UniformList, XAxisAnchor,
+        YAxisAnchor,
     },
     warpui::keymap::macros::*,
     warpui::keymap::FixedBinding,
@@ -76,7 +76,12 @@ pub enum SourceControlViewAction {
     /// tab to that worktree instead of switching in place.
     OpenWorktreeForBranch(PathBuf),
     OpenCreateBranchDialog,
+    /// Pull only (the sync button's default when behind the upstream).
+    Pull,
+    /// Pull if behind, then push if ahead or unpublished.
     Sync,
+    /// Toggles the "Pull" / "Pull, then push" menu on the sync button.
+    ToggleSyncMenu,
     // File rows (repo-relative paths)
     OpenFile(String),
     OpenDiff(String),
@@ -141,6 +146,12 @@ enum RepoTarget {
 /// The Source Control left-panel tab.
 pub struct SourceControlView {
     repo: RepoTarget,
+    /// The most recent directory pushed via `set_active_directory`. Repo
+    /// detection is async at startup, so when a restored session's directory
+    /// arrives before `DetectedRepositories` knows about its repo, this lets
+    /// the `DetectedGitRepo` subscription retry instead of staying empty
+    /// until the next tab interaction.
+    last_directory: Option<LocalOrRemotePath>,
     /// Flat list rendered by the `UniformList`; rebuilt on model / collapse
     /// changes.
     list_items: Arc<Vec<SourceControlListItem>>,
@@ -159,6 +170,8 @@ pub struct SourceControlView {
     dialog: DialogState,
     /// True while a view-driven sync (pull/push) chain is in flight.
     sync_in_flight: bool,
+    /// Needed by `keymap_context` to look up the focused view.
+    window_id: warpui::WindowId,
 }
 
 impl SourceControlView {
@@ -175,18 +188,22 @@ impl SourceControlView {
                 SourceControlViewAction::ArrowDown,
                 id!(SourceControlView::ui_name()),
             ),
+            // Enter activates and space stages/unstages the selected row.
+            // Both are gated on `SourceControlView_NotEditing` (see
+            // `keymap_context`): context predicates are evaluated against
+            // every view in the focus ancestor chain, so a plain ui_name
+            // scope would still fire — and eat the keystroke — while a
+            // descendant text input (commit editor, dialog fields, branch
+            // filter) is focused.
             FixedBinding::new(
                 "enter",
                 SourceControlViewAction::Activate,
-                id!(SourceControlView::ui_name()),
+                id!("SourceControlView_NotEditing"),
             ),
-            // Space stages/unstages the selected file row. Scoped to this
-            // view's focus id, so it can't shadow text inputs (the commit
-            // editor and dialogs are separately focused child views).
             FixedBinding::new(
                 "space",
                 SourceControlViewAction::ToggleStageSelected,
-                id!(SourceControlView::ui_name()),
+                id!("SourceControlView_NotEditing"),
             ),
             FixedBinding::new(
                 "escape",
@@ -201,9 +218,28 @@ impl SourceControlView {
         let commit_box = CommitBoxState::new(ctx);
         let dialog = DialogState::new(ctx);
 
+        // The commit box collapses to a single line until focused or
+        // non-empty; re-render on focus changes so the height tracks.
+        ctx.subscribe_to_view(&commit_box.message_editor, |_, _, event, ctx| {
+            if matches!(
+                event,
+                crate::editor::Event::Focused | crate::editor::Event::Blurred
+            ) {
+                ctx.notify();
+            }
+        });
+
         ctx.subscribe_to_view(&commit_box.commit_menu, |me, _, event, ctx| match event {
             crate::menu::Event::Close { .. } | crate::menu::Event::ItemSelected => {
                 me.commit_box.menu_open = false;
+                ctx.notify();
+            }
+            crate::menu::Event::ItemHovered => {}
+        });
+
+        ctx.subscribe_to_view(&header.sync_menu, |me, _, event, ctx| match event {
+            crate::menu::Event::Close { .. } | crate::menu::Event::ItemSelected => {
+                me.header.sync_menu_open = false;
                 ctx.notify();
             }
             crate::menu::Event::ItemHovered => {}
@@ -220,12 +256,25 @@ impl SourceControlView {
             });
         }
 
+        // Repo detection runs async at startup: a restored session's
+        // directory can arrive here before `DetectedRepositories` knows its
+        // repo, leaving the panel empty until the next tab interaction.
+        // Retry the last directory when a repo gets detected.
+        #[cfg(feature = "local_fs")]
+        ctx.subscribe_to_model(&DetectedRepositories::handle(ctx), |me, _, event, ctx| {
+            let DetectedRepositoriesEvent::DetectedGitRepo { .. } = event;
+            if matches!(me.repo, RepoTarget::None) && me.last_directory.is_some() {
+                me.set_active_directory(me.last_directory.clone(), ctx);
+            }
+        });
+
         let mut collapsed_sections = HashSet::new();
         // Commits is collapsed by default; history loads lazily on expand.
         collapsed_sections.insert(Section::Commits);
 
         Self {
             repo: RepoTarget::None,
+            last_directory: None,
             list_items: Arc::new(Vec::new()),
             collapsed_sections,
             selected_index: None,
@@ -237,6 +286,7 @@ impl SourceControlView {
             commit_box,
             dialog,
             sync_in_flight: false,
+            window_id: ctx.window_id(),
         }
     }
 
@@ -265,6 +315,7 @@ impl SourceControlView {
         if !FeatureFlag::SourceControlPanel.is_enabled() {
             return;
         }
+        self.last_directory = directory.clone();
         let new_target = match directory {
             None => RepoTarget::None,
             Some(LocalOrRemotePath::Remote(_)) => RepoTarget::RemoteUnsupported,
@@ -302,7 +353,9 @@ impl SourceControlView {
 
         if let RepoTarget::Local(model) = &self.repo {
             let model = model.clone();
-            let limit = *SourceControlSettings::as_ref(ctx).history_commit_limit.value();
+            let limit = *SourceControlSettings::as_ref(ctx)
+                .history_commit_limit
+                .value();
             let history_enabled = !self.collapsed_sections.contains(&Section::Commits);
             let worktree_details = !self.collapsed_sections.contains(&Section::Worktrees);
             model.update(ctx, |m, ctx| {
@@ -372,10 +425,7 @@ impl SourceControlView {
     }
 
     fn send_action_telemetry(action: SourceControlPanelAction, ctx: &mut ViewContext<Self>) {
-        send_telemetry_from_ctx!(
-            SourceControlTelemetryEvent::PanelAction { action },
-            ctx
-        );
+        send_telemetry_from_ctx!(SourceControlTelemetryEvent::PanelAction { action }, ctx);
     }
 
     fn handle_model_event(&mut self, event: &SourceControlEvent, ctx: &mut ViewContext<Self>) {
@@ -455,20 +505,26 @@ impl SourceControlView {
         let Some(model) = self.model().cloned() else {
             return;
         };
-        let (branches, worktrees, current_branch, has_staged) = {
+        let (branches, worktrees, current_branch, detached, has_staged) = {
             let model = model.as_ref(ctx);
-            let current_branch = model.status().and_then(|status| {
-                (!status.branch.detached).then(|| status.branch.head.clone())
-            });
+            let current_branch = model
+                .status()
+                .and_then(|status| (!status.branch.detached).then(|| status.branch.head.clone()));
             (
                 model.branches().to_vec(),
                 model.worktrees().to_vec(),
                 current_branch,
+                model.status().is_some_and(|s| s.branch.detached),
                 model.status().is_some_and(|s| !s.staged.is_empty()),
             )
         };
-        self.header
-            .refresh_branch_items(&branches, &worktrees, current_branch.as_deref(), ctx);
+        self.header.refresh_branch_items(
+            &branches,
+            &worktrees,
+            current_branch.as_deref(),
+            detached,
+            ctx,
+        );
 
         let busy = self.busy(ctx);
         // Disabling the split button also disables the Amend menu entry; an
@@ -570,7 +626,8 @@ impl SourceControlView {
     // ── Repo / file plumbing ─────────────────────────────────────────
 
     fn repo_path(&self, app: &AppContext) -> Option<PathBuf> {
-        self.model().map(|m| m.as_ref(app).repo_path().to_path_buf())
+        self.model()
+            .map(|m| m.as_ref(app).repo_path().to_path_buf())
     }
 
     fn open_file(&mut self, relative_path: &str, ctx: &mut ViewContext<Self>) {
@@ -712,7 +769,10 @@ impl SourceControlView {
         );
     }
 
-    fn start_sync(&mut self, ctx: &mut ViewContext<Self>) {
+    /// Runs pull and/or push for the current branch. `include_push: false` is
+    /// the sync button's default when behind (pull only); pushing is opted
+    /// into via the sync menu's "Pull, then push" or the push/publish states.
+    fn start_sync(&mut self, include_push: bool, ctx: &mut ViewContext<Self>) {
         if self.busy(ctx) {
             return;
         }
@@ -726,7 +786,7 @@ impl SourceControlView {
                     model.repo_path().to_path_buf(),
                     status.branch.head.clone(),
                     status.branch.behind > 0,
-                    status.branch.ahead > 0 || status.branch.upstream.is_none(),
+                    include_push && (status.branch.ahead > 0 || status.branch.upstream.is_none()),
                 )
             })
         }) else {
@@ -735,7 +795,14 @@ impl SourceControlView {
         if !needs_pull && !needs_push {
             return;
         }
-        Self::send_action_telemetry(SourceControlPanelAction::Sync, ctx);
+        Self::send_action_telemetry(
+            if include_push {
+                SourceControlPanelAction::Sync
+            } else {
+                SourceControlPanelAction::Pull
+            },
+            ctx,
+        );
         self.sync_in_flight = true;
         self.refresh_controls(ctx);
         ctx.notify();
@@ -870,9 +937,7 @@ impl SourceControlView {
                         },
                         name,
                     ),
-                    (None, Some(name)) => {
-                        (git_ops::WorktreeBranch::Existing(name.clone()), name)
-                    }
+                    (None, Some(name)) => (git_ops::WorktreeBranch::Existing(name.clone()), name),
                     (None, None) => return,
                 };
                 let Some(repo_path) = self.repo_path(ctx) else {
@@ -937,6 +1002,9 @@ impl SourceControlView {
                 } else if self.commit_box.menu_open {
                     self.commit_box.menu_open = false;
                     ctx.notify();
+                } else if self.header.sync_menu_open {
+                    self.header.sync_menu_open = false;
+                    ctx.notify();
                 } else {
                     self.selected_index = None;
                     ctx.notify();
@@ -964,8 +1032,9 @@ impl SourceControlView {
                     }
                     Section::Worktrees => {
                         if let Some(model) = self.model().cloned() {
-                            model
-                                .update(ctx, |m, ctx| m.set_worktree_details_enabled(expanded, ctx));
+                            model.update(ctx, |m, ctx| {
+                                m.set_worktree_details_enabled(expanded, ctx)
+                            });
                         }
                     }
                     _ => {}
@@ -989,7 +1058,18 @@ impl SourceControlView {
             Action::OpenCreateBranchDialog => {
                 self.open_dialog(ActiveDialog::CreateBranch, ctx);
             }
-            Action::Sync => self.start_sync(ctx),
+            Action::Pull => {
+                self.header.sync_menu_open = false;
+                self.start_sync(false, ctx);
+            }
+            Action::Sync => {
+                self.header.sync_menu_open = false;
+                self.start_sync(true, ctx);
+            }
+            Action::ToggleSyncMenu => {
+                self.header.sync_menu_open = !self.header.sync_menu_open;
+                ctx.notify();
+            }
             Action::OpenFile(path) => {
                 let path = path.clone();
                 self.open_file(&path, ctx);
@@ -1103,8 +1183,18 @@ impl SourceControlView {
 
     // ── Rendering ────────────────────────────────────────────────────
 
-    fn section_header_actions(section: Section, busy: bool) -> Vec<RowAction> {
+    fn section_header_actions(section: Section, count: usize, busy: bool) -> Vec<RowAction> {
         if busy {
+            return Vec::new();
+        }
+        // Bulk stage/unstage/discard actions act on the section's items, so
+        // an empty section would only offer dead buttons. Stashes/Worktrees
+        // keep their `+` since it creates something new.
+        let acts_on_items = matches!(
+            section,
+            Section::Conflicts | Section::Staged | Section::Changes | Section::Untracked
+        );
+        if acts_on_items && count == 0 {
             return Vec::new();
         }
         match section {
@@ -1112,38 +1202,45 @@ impl SourceControlView {
                 icon: Icon::Plus,
                 tooltip: "Stage all (mark resolved)",
                 action: SourceControlViewAction::StageSection(Section::Conflicts),
+                danger: false,
             }],
             Section::Staged => vec![RowAction {
                 icon: Icon::Minus,
                 tooltip: "Unstage all",
                 action: SourceControlViewAction::UnstageAll,
+                danger: false,
             }],
             Section::Changes => vec![
                 RowAction {
                     icon: Icon::ReverseLeft,
                     tooltip: "Discard all changes",
                     action: SourceControlViewAction::RequestDiscardAll,
+                    danger: true,
                 },
                 RowAction {
                     icon: Icon::Plus,
                     tooltip: "Stage all",
                     action: SourceControlViewAction::StageSection(Section::Changes),
+                    danger: false,
                 },
             ],
             Section::Untracked => vec![RowAction {
                 icon: Icon::Plus,
                 tooltip: "Stage all untracked",
                 action: SourceControlViewAction::StageSection(Section::Untracked),
+                danger: false,
             }],
             Section::Stashes => vec![RowAction {
                 icon: Icon::Plus,
                 tooltip: "Stash changes",
                 action: SourceControlViewAction::OpenStashDialog,
+                danger: false,
             }],
             Section::Worktrees => vec![RowAction {
                 icon: Icon::Plus,
                 tooltip: "Add worktree",
                 action: SourceControlViewAction::OpenAddWorktreeDialog,
+                danger: false,
             }],
             Section::Commits => Vec::new(),
         }
@@ -1155,12 +1252,14 @@ impl SourceControlView {
             icon: Icon::File,
             tooltip: "Open file",
             action: SourceControlViewAction::OpenFile(path.clone()),
+            danger: false,
         }];
         if section != Section::Untracked {
             actions.push(RowAction {
                 icon: Icon::GitBranch,
                 tooltip: "Open diff",
                 action: SourceControlViewAction::OpenDiff(path.clone()),
+                danger: false,
             });
         }
         if busy {
@@ -1171,11 +1270,13 @@ impl SourceControlView {
                 icon: Icon::Plus,
                 tooltip: "Mark resolved (stage)",
                 action: SourceControlViewAction::Stage(path),
+                danger: false,
             }),
             Section::Staged => actions.push(RowAction {
                 icon: Icon::Minus,
                 tooltip: "Unstage",
                 action: SourceControlViewAction::Unstage(path),
+                danger: false,
             }),
             Section::Changes => {
                 actions.push(RowAction {
@@ -1185,17 +1286,20 @@ impl SourceControlView {
                         section,
                         change: change.clone(),
                     },
+                    danger: true,
                 });
                 actions.push(RowAction {
                     icon: Icon::Plus,
                     tooltip: "Stage",
                     action: SourceControlViewAction::Stage(path),
+                    danger: false,
                 });
             }
             Section::Untracked => actions.push(RowAction {
                 icon: Icon::Plus,
                 tooltip: "Stage",
                 action: SourceControlViewAction::Stage(path),
+                danger: false,
             }),
             Section::Stashes | Section::Worktrees | Section::Commits => {}
         }
@@ -1215,7 +1319,9 @@ impl SourceControlView {
         let busy = self.busy(app);
         let branch_status = model.as_ref(app).status().map(|s| s.branch.clone());
 
-        let header = self.header.render(branch_status.as_ref(), busy, appearance, app);
+        let header = self
+            .header
+            .render(branch_status.as_ref(), busy, appearance, app);
         let commit_box = self.commit_box.render(appearance, app);
 
         let list_items = self.list_items.clone();
@@ -1238,7 +1344,7 @@ impl SourceControlView {
                                     *section,
                                     *count,
                                     collapsed.contains(section),
-                                    Self::section_header_actions(*section, busy),
+                                    Self::section_header_actions(*section, *count, busy),
                                     state,
                                     appearance,
                                     app,
@@ -1272,23 +1378,30 @@ impl SourceControlView {
                                             action: SourceControlViewAction::StashApply(
                                                 stash.index,
                                             ),
+                                            danger: false,
                                         },
                                         RowAction {
                                             icon: Icon::Check,
                                             tooltip: "Pop (apply and drop)",
                                             action: SourceControlViewAction::StashPop(stash.index),
+                                            danger: false,
                                         },
                                         RowAction {
                                             icon: Icon::Trash,
                                             tooltip: "Drop",
-                                            action: SourceControlViewAction::StashDrop(
-                                                stash.index,
-                                            ),
+                                            action: SourceControlViewAction::StashDrop(stash.index),
+                                            danger: true,
                                         },
                                     ]
                                 };
                                 render_stash_row(
-                                    stash, actions, index, is_selected, state, appearance, app,
+                                    stash,
+                                    actions,
+                                    index,
+                                    is_selected,
+                                    state,
+                                    appearance,
+                                    app,
                                 )
                             }
                             SourceControlListItem::Worktree(worktree) => {
@@ -1301,6 +1414,7 @@ impl SourceControlView {
                                         action: SourceControlViewAction::OpenWorktreeInNewTab(
                                             worktree.path.clone(),
                                         ),
+                                        danger: false,
                                     }];
                                     if !worktree.is_main {
                                         actions.push(RowAction {
@@ -1309,16 +1423,28 @@ impl SourceControlView {
                                             action: SourceControlViewAction::RequestRemoveWorktree(
                                                 worktree.path.clone(),
                                             ),
+                                            danger: true,
                                         });
                                     }
                                     actions
                                 };
                                 render_worktree_row(
-                                    worktree, actions, index, is_selected, state, appearance, app,
+                                    worktree,
+                                    actions,
+                                    index,
+                                    is_selected,
+                                    state,
+                                    appearance,
+                                    app,
                                 )
                             }
                             SourceControlListItem::Commit(commit) => render_commit_row(
-                                commit, index, is_selected, state, appearance, app,
+                                commit,
+                                index,
+                                is_selected,
+                                state,
+                                appearance,
+                                app,
                             ),
                             SourceControlListItem::EmptyHint { text, .. } => {
                                 render_empty_hint(text, appearance)
@@ -1364,6 +1490,26 @@ impl SourceControlView {
                     ),
                     PositioningAxis::relative_to_stack_child(
                         &self.commit_box.save_position_id,
+                        PositionedElementOffsetBounds::WindowBySize,
+                        OffsetType::Pixel(4.),
+                        AnchorPair::new(YAxisAnchor::Bottom, YAxisAnchor::Top),
+                    ),
+                ),
+            );
+        }
+
+        if self.header.sync_menu_open {
+            stack.add_positioned_overlay_child(
+                ChildView::new(&self.header.sync_menu).finish(),
+                OffsetPositioning::from_axes(
+                    PositioningAxis::relative_to_stack_child(
+                        &self.header.sync_save_position_id,
+                        PositionedElementOffsetBounds::WindowBySize,
+                        OffsetType::Pixel(0.),
+                        AnchorPair::new(XAxisAnchor::Right, XAxisAnchor::Right),
+                    ),
+                    PositioningAxis::relative_to_stack_child(
+                        &self.header.sync_save_position_id,
                         PositionedElementOffsetBounds::WindowBySize,
                         OffsetType::Pixel(4.),
                         AnchorPair::new(YAxisAnchor::Bottom, YAxisAnchor::Top),
@@ -1459,6 +1605,25 @@ impl TypedActionView for SourceControlView {
 impl View for SourceControlView {
     fn ui_name() -> &'static str {
         "SourceControlView"
+    }
+
+    fn keymap_context(&self, ctx: &AppContext) -> warpui::keymap::Context {
+        let mut context = Self::default_keymap_context();
+
+        // Suppress list shortcuts (enter/space) while a descendant text
+        // input is focused — the commit editor, dialog fields, or the branch
+        // picker's filter — otherwise the binding fires before the editor
+        // receives the keystroke as text input. Same pattern as
+        // `CodeReviewView_NotEditing`.
+        let editor_focused = ctx
+            .focused_view_id(self.window_id)
+            .and_then(|view_id| ctx.view_name(self.window_id, view_id))
+            .is_some_and(|name| matches!(name, "EditorView" | "RichTextEditorView"));
+        if !editor_focused {
+            context.set.insert("SourceControlView_NotEditing");
+        }
+
+        context
     }
 
     fn on_blur(&mut self, _: &BlurContext, ctx: &mut ViewContext<Self>) {
