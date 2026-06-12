@@ -1392,6 +1392,21 @@ impl SourceControlView {
     }
 }
 
+#[cfg(feature = "integration_tests")]
+impl SourceControlView {
+    /// Integration-test accessor for the rendered flat list.
+    pub fn integration_list_items(&self) -> &[SourceControlListItem] {
+        &self.list_items
+    }
+
+    /// Integration-test helper: sets the commit message editor's text.
+    pub fn integration_set_commit_message(&self, text: &str, ctx: &mut ViewContext<Self>) {
+        self.commit_box.message_editor.update(ctx, |editor, ctx| {
+            editor.system_reset_buffer_text(text, ctx);
+        });
+    }
+}
+
 fn render_empty_state(title: &str, subtitle: &str, app: &AppContext) -> Box<dyn Element> {
     let appearance = Appearance::as_ref(app);
     let theme = appearance.theme();
