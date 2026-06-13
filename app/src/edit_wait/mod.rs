@@ -328,7 +328,10 @@ pub mod registry {
 
         /// Record a new waiter for `path`, keyed by canonical path.
         pub fn register(&mut self, path: &Path, addr: WaitAddr) {
-            self.waiters.entry(Self::canon(path)).or_default().push(addr);
+            self.waiters
+                .entry(Self::canon(path))
+                .or_default()
+                .push(addr);
         }
 
         /// A tab for `path` closed: notify and drop ALL waiters on it.

@@ -53,11 +53,15 @@ use crate::workspace::view::conversation_list::view::{
 use crate::workspace::view::global_search::view::{
     Event as GlobalSearchViewEvent, GlobalSearchEntryFocus, GlobalSearchView,
 };
+use crate::workspace::view::source_control::view::{
+    Event as SourceControlViewEvent, SourceControlView,
+};
 use crate::workspace::view::{
     LEFT_PANEL_AGENT_CONVERSATIONS_BINDING_NAME, LEFT_PANEL_GLOBAL_SEARCH_BINDING_NAME,
-    LEFT_PANEL_PROJECT_EXPLORER_BINDING_NAME, LEFT_PANEL_WARP_DRIVE_BINDING_NAME,
-    OPEN_GLOBAL_SEARCH_BINDING_NAME, TOGGLE_CONVERSATION_LIST_VIEW_BINDING_NAME,
-    TOGGLE_PROJECT_EXPLORER_BINDING_NAME, TOGGLE_WARP_DRIVE_BINDING_NAME,
+    LEFT_PANEL_PROJECT_EXPLORER_BINDING_NAME, LEFT_PANEL_SOURCE_CONTROL_BINDING_NAME,
+    LEFT_PANEL_WARP_DRIVE_BINDING_NAME, OPEN_GLOBAL_SEARCH_BINDING_NAME,
+    TOGGLE_CONVERSATION_LIST_VIEW_BINDING_NAME, TOGGLE_PROJECT_EXPLORER_BINDING_NAME,
+    TOGGLE_SOURCE_CONTROL_BINDING_NAME, TOGGLE_WARP_DRIVE_BINDING_NAME,
 };
 use crate::workspace::WorkspaceAction;
 use crate::TelemetryEvent;
@@ -67,6 +71,7 @@ struct MouseStateHandles {
     project_explorer_button: MouseStateHandle,
     conversation_list_view_button: MouseStateHandle,
     global_search_button: MouseStateHandle,
+    source_control_button: MouseStateHandle,
     warp_drive_button: MouseStateHandle,
 }
 
@@ -76,6 +81,7 @@ pub enum LeftPanelAction {
     GlobalSearch { entry_focus: GlobalSearchEntryFocus },
     WarpDrive,
     ConversationListView,
+    SourceControl,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -95,6 +101,19 @@ pub enum LeftPanelEvent {
         conversation_title: String,
         terminal_view_id: Option<warpui::EntityId>,
     },
+    /// Open the code review right panel for `repo_path` and select
+    /// `file_path` (repo-relative). Emitted by the Source Control panel.
+    #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
+    OpenSourceControlDiff {
+        repo_path: PathBuf,
+        file_path: String,
+    },
+    /// Execute a `cd` in the active terminal (worktree-aware branch checkout
+    /// from the Source Control panel).
+    #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
+    ChangeDirectoryInActiveTerminal {
+        path: PathBuf,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,6 +122,7 @@ pub enum ToolPanelView {
     GlobalSearch { entry_focus: GlobalSearchEntryFocus },
     WarpDrive,
     ConversationListView,
+    SourceControl,
 }
 
 /// Encapsulates the active view state to enforce that all mutations go through
@@ -170,6 +190,7 @@ pub struct LeftPanelView {
     close_button_mouse_state: MouseStateHandle,
     warp_drive_view: ViewHandle<DrivePanel>,
     conversation_list_view: ViewHandle<ConversationListView>,
+    source_control_view: ViewHandle<SourceControlView>,
     active_view: active_view_state::ActiveViewState,
     toolbelt_buttons: Vec<ToolbeltButtonConfig>,
     active_pane_group: Option<WeakViewHandle<PaneGroup>>,
@@ -214,6 +235,7 @@ impl LeftPanelView {
         };
         let warp_drive_view = ctx.add_typed_action_view(DrivePanel::new);
         let conversation_list_view = ctx.add_typed_action_view(ConversationListView::new);
+        let source_control_view = ctx.add_typed_action_view(SourceControlView::new);
 
         ctx.subscribe_to_view(&warp_drive_view, |_me, _, event, ctx| {
             ctx.emit(LeftPanelEvent::WarpDrive(event.clone()));
@@ -234,6 +256,10 @@ impl LeftPanelView {
                     terminal_view_id: *terminal_view_id,
                 });
             }
+        });
+
+        ctx.subscribe_to_view(&source_control_view, |_me, _, event, ctx| {
+            Self::handle_source_control_event(event, ctx);
         });
 
         let active_view = views.first().copied().unwrap_or(ToolPanelView::WarpDrive);
@@ -299,6 +325,13 @@ impl LeftPanelView {
                     view.set_root_directories(local_paths.clone(), view_ctx);
                 });
 
+                // The Source Control panel follows the active session's most
+                // recent directory.
+                let most_recent_directory = directories.first().map(|d| d.path.clone());
+                me.source_control_view.update(ctx, |view, ctx| {
+                    view.set_active_directory(most_recent_directory, ctx);
+                });
+
                 // Directories are already in display order (most recent first) from the model
                 let local_directories = deduplicate_by_directory_name(local_paths);
                 let file_tree_view =
@@ -327,6 +360,7 @@ impl LeftPanelView {
             close_button_mouse_state: Default::default(),
             warp_drive_view,
             conversation_list_view,
+            source_control_view,
             active_view: active_view_state::new(active_view),
             toolbelt_buttons,
             active_pane_group: None,
@@ -454,6 +488,22 @@ impl LeftPanelView {
                     active_icon: Some(Icon::Conversation),
                     tooltip_text: "Agent conversations".to_string(),
                     action: LeftPanelAction::ConversationListView,
+                    render_with_active_state: false,
+                    tooltip_keybinding: toolbelt_tooltip_keybinding(&tooltip_keybinding_names, ctx),
+                    tooltip_keybinding_names,
+                }
+            }
+            ToolPanelView::SourceControl => {
+                let tooltip_keybinding_names = vec![
+                    LEFT_PANEL_SOURCE_CONTROL_BINDING_NAME,
+                    TOGGLE_SOURCE_CONTROL_BINDING_NAME,
+                ];
+
+                ToolbeltButtonConfig {
+                    icon: Icon::SourceControl,
+                    active_icon: None,
+                    tooltip_text: "Source control".to_string(),
+                    action: LeftPanelAction::SourceControl,
                     render_with_active_state: false,
                     tooltip_keybinding: toolbelt_tooltip_keybinding(&tooltip_keybinding_names, ctx),
                     tooltip_keybinding_names,
@@ -636,6 +686,11 @@ impl LeftPanelView {
             view.set_root_directories(local_paths.clone(), view_ctx);
         });
 
+        let most_recent_directory = active_directories.first().map(|d| d.path.clone());
+        self.source_control_view.update(ctx, |view, ctx| {
+            view.set_active_directory(most_recent_directory, ctx);
+        });
+
         let local_directories = deduplicate_by_directory_name(local_paths);
         let active_file_model = pane_group.as_ref(ctx).active_file_model().clone();
 
@@ -717,6 +772,11 @@ impl LeftPanelView {
                     view.on_left_panel_focused(ctx);
                 });
             }
+            ToolPanelView::SourceControl => {
+                self.source_control_view.update(ctx, |view, ctx| {
+                    view.on_left_panel_focused(ctx);
+                });
+            }
         }
     }
 
@@ -770,6 +830,47 @@ impl LeftPanelView {
             }
         }
     }
+
+    #[cfg(feature = "local_fs")]
+    fn handle_source_control_event(event: &SourceControlViewEvent, ctx: &mut ViewContext<Self>) {
+        match event {
+            SourceControlViewEvent::OpenFile { path } => {
+                let settings = EditorSettings::as_ref(ctx);
+                let target = resolve_file_target_with_editor_choice(
+                    path,
+                    *settings.open_code_panels_file_editor,
+                    *settings.prefer_markdown_viewer,
+                    *settings.open_file_layout,
+                    None,
+                );
+                ctx.emit(LeftPanelEvent::OpenFileWithTarget {
+                    location: LocalOrRemotePath::Local(path.clone()),
+                    target,
+                    line_col: None,
+                });
+            }
+            SourceControlViewEvent::OpenDiff {
+                repo_path,
+                file_path,
+            } => {
+                ctx.emit(LeftPanelEvent::OpenSourceControlDiff {
+                    repo_path: repo_path.clone(),
+                    file_path: file_path.clone(),
+                });
+            }
+            SourceControlViewEvent::OpenWorktreeInNewTab { path } => {
+                ctx.emit(LeftPanelEvent::FileTree(
+                    pane_group::Event::OpenDirectoryInNewTab { path: path.clone() },
+                ));
+            }
+            SourceControlViewEvent::ChangeDirectory { path } => {
+                ctx.emit(LeftPanelEvent::ChangeDirectoryInActiveTerminal { path: path.clone() });
+            }
+        }
+    }
+
+    #[cfg(not(feature = "local_fs"))]
+    fn handle_source_control_event(_event: &SourceControlViewEvent, _ctx: &mut ViewContext<Self>) {}
 
     #[cfg(feature = "local_fs")]
     fn handle_file_tree_event(&mut self, event: &FileTreeEvent, ctx: &mut ViewContext<Self>) {
@@ -868,6 +969,9 @@ impl LeftPanelView {
                 LeftPanelAction::WarpDrive => self.active_view.get() == ToolPanelView::WarpDrive,
                 LeftPanelAction::ConversationListView => {
                     self.active_view.get() == ToolPanelView::ConversationListView
+                }
+                LeftPanelAction::SourceControl => {
+                    self.active_view.get() == ToolPanelView::SourceControl
                 }
             };
         }
@@ -1010,6 +1114,9 @@ impl LeftPanelView {
                 active_view_state::set(self, ToolPanelView::ConversationListView, ctx);
                 send_telemetry_from_ctx!(TelemetryEvent::ConversationListViewOpened, ctx);
             }
+            LeftPanelAction::SourceControl => {
+                active_view_state::set(self, ToolPanelView::SourceControl, ctx);
+            }
         }
     }
 
@@ -1109,6 +1216,7 @@ impl View for LeftPanelView {
                 }
                 ToolPanelView::WarpDrive => ctx.focus(&self.warp_drive_view),
                 ToolPanelView::ConversationListView => ctx.focus(&self.conversation_list_view),
+                ToolPanelView::SourceControl => ctx.focus(&self.source_control_view),
             }
         }
     }
@@ -1122,6 +1230,7 @@ impl View for LeftPanelView {
                 .conversation_list_view_button
                 .clone(),
             self.mouse_state_handles.global_search_button.clone(),
+            self.mouse_state_handles.source_control_button.clone(),
             self.mouse_state_handles.warp_drive_button.clone(),
         ];
 
@@ -1180,6 +1289,9 @@ impl View for LeftPanelView {
             .finish(),
             ToolPanelView::ConversationListView => {
                 Shrinkable::new(1.0, ChildView::new(&self.conversation_list_view).finish()).finish()
+            }
+            ToolPanelView::SourceControl => {
+                Shrinkable::new(1.0, ChildView::new(&self.source_control_view).finish()).finish()
             }
         };
 

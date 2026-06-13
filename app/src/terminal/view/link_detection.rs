@@ -542,7 +542,7 @@ impl super::TerminalView {
                 // normal terminal mode keeps behavior — and cost — exactly as before.
                 let cli_agent_repo_files = self
                     .should_detect_cli_agent_file_links(ctx)
-                    .then(|| FileSearchModel::as_ref(ctx).get_repo_contents(ctx));
+                    .then(|| FileSearchModel::as_ref(ctx).get_repo_contents("", ctx));
 
                 // Using the thread builder instead of ctx.spawn here so that the previous
                 // scanning job will be dropped once there is a new scanning job created.

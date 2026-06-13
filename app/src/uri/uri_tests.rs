@@ -341,9 +341,7 @@ fn test_action_open_file_editor_parse_with_path_only() {
 
     let action = Action::parse(&url).unwrap();
     match action {
-        Action::OpenFileEditor {
-            path, line_col, ..
-        } => {
+        Action::OpenFileEditor { path, line_col, .. } => {
             assert_eq!(path, expected_path);
             assert_eq!(line_col, None);
         }
@@ -368,7 +366,9 @@ fn test_action_open_file_editor_parse_with_trusted_wait_addr() {
     let action = Action::parse(&url).unwrap();
     match action {
         Action::OpenFileEditor {
-            path, line_col, wait,
+            path,
+            line_col,
+            wait,
         } => {
             assert_eq!(path, expected_path);
             assert_eq!(line_col, None);
@@ -392,7 +392,9 @@ fn test_action_open_file_editor_parse_rejects_untrusted_wait_addr() {
     let action = Action::parse(&url).unwrap();
     match action {
         Action::OpenFileEditor {
-            path, line_col, wait,
+            path,
+            line_col,
+            wait,
         } => {
             assert_eq!(path, expected_path);
             assert_eq!(line_col, None);
@@ -413,9 +415,7 @@ fn test_action_open_file_editor_parse_with_line_only() {
 
     let action = Action::parse(&url).unwrap();
     match action {
-        Action::OpenFileEditor {
-            path, line_col, ..
-        } => {
+        Action::OpenFileEditor { path, line_col, .. } => {
             assert_eq!(path, expected_path);
             assert_eq!(
                 line_col,
@@ -440,9 +440,7 @@ fn test_action_open_file_editor_parse_with_line_and_column() {
 
     let action = Action::parse(&url).unwrap();
     match action {
-        Action::OpenFileEditor {
-            path, line_col, ..
-        } => {
+        Action::OpenFileEditor { path, line_col, .. } => {
             assert_eq!(path, expected_path);
             assert_eq!(
                 line_col,
@@ -468,9 +466,7 @@ fn test_action_open_file_editor_parse_decodes_percent_encoded_path() {
 
     let action = Action::parse(&url).unwrap();
     match action {
-        Action::OpenFileEditor {
-            path, line_col, ..
-        } => {
+        Action::OpenFileEditor { path, line_col, .. } => {
             assert_eq!(path, expected_path);
             assert_eq!(
                 line_col,
@@ -494,9 +490,7 @@ fn test_action_open_file_editor_parse_expands_home_dir() {
 
     let action = Action::parse(&url).unwrap();
     match action {
-        Action::OpenFileEditor {
-            path, line_col, ..
-        } => {
+        Action::OpenFileEditor { path, line_col, .. } => {
             assert_eq!(
                 path,
                 PathBuf::from(shellexpand::tilde("~/tmp/test.rs").into_owned())

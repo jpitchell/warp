@@ -631,6 +631,9 @@ pub struct CodeReviewView {
     pending_precise_scroll: Option<PendingPreciseScroll>,
     /// Comment to scroll to once the view finishes loading.
     pending_jump_to_comment: Option<CommentId>,
+    /// Repo-relative file to expand + scroll to once the diff loads (used by
+    /// the Source Control panel's open-diff action).
+    pending_file_selection: Option<String>,
 
     active_comment_model: Option<ModelHandle<ReviewCommentBatch>>,
 
@@ -1354,6 +1357,7 @@ impl CodeReviewView {
             comment_composer: None,
             pending_precise_scroll: None,
             pending_jump_to_comment: None,
+            pending_file_selection: None,
             active_comment_model: None,
             init_project_button,
             #[cfg(not(target_family = "wasm"))]
@@ -2597,6 +2601,44 @@ impl CodeReviewView {
             self.handle_jump_to_comment_location(&comment_id, ctx);
         }
 
+        if let Some(path) = self.pending_file_selection.take() {
+            self.select_file_by_path(&path, ctx);
+        }
+
+        ctx.notify();
+    }
+
+    /// Expands and scrolls to `path` (repo-relative) in the diff list. When
+    /// the diff hasn't loaded yet, the selection is deferred until it does.
+    /// Used by the Source Control panel's open-diff action.
+    pub fn select_file_by_path(&mut self, path: &str, ctx: &mut ViewContext<Self>) {
+        let file_index = self
+            .active_repo
+            .as_ref()
+            .and_then(|repo| match &repo.state {
+                CodeReviewViewState::Loaded(state) => state.file_states.get_index_of(path),
+                _ => None,
+            });
+        let Some(index) = file_index else {
+            self.pending_file_selection = Some(path.to_string());
+            return;
+        };
+
+        let is_expanded = self
+            .active_repo
+            .as_ref()
+            .and_then(|repo| match &repo.state {
+                CodeReviewViewState::Loaded(state) => {
+                    state.file_states.get(path).map(|file| file.is_expanded)
+                }
+                _ => None,
+            })
+            .unwrap_or(true);
+        if !is_expanded {
+            self.handle_action(&CodeReviewAction::ToggleFileExpanded(path.to_string()), ctx);
+        }
+        self.viewported_list_state
+            .scroll_to_with_offset(index, Pixels::new(0.0));
         ctx.notify();
     }
 

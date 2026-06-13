@@ -517,6 +517,7 @@ fn alt_screen_file_links_gated_by_flag_setting_and_cli_agent_session() {
                         plugin_version: None,
                         draft_text: None,
                         custom_command_prefix: None,
+                        received_rich_notification: false,
                     },
                     ctx,
                 );

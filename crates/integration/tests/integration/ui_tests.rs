@@ -322,6 +322,7 @@ integration_tests! {
     test_file_tree_keyboard_navigation,
     test_file_tree_non_openable_files,
     test_file_tree_nested_file_opening,
+    test_source_control_panel_stage_and_commit,
 
     // Go to Line tests
     test_goto_line_dialog_open_close,

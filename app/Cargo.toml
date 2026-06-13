@@ -685,6 +685,12 @@ default = [
     "billing_and_usage_page_v2",
     "remote_code_review",
     "git_operations_in_code_review",
+    # Fork: ship the source control panel and CLI agent file links on by
+    # default. These force-enable the runtime FeatureFlag::SourceControlPanel /
+    # FeatureFlag::CliAgentFileLinks via app/src/features.rs on every channel
+    # (including the warp-oss DMG), without needing --features.
+    "source_control_panel",
+    "cli_agent_file_links",
 ]
 # Enable this feature to automatically perform heap profiling.  NOTE: This will
 # substantially slow down program execution.
@@ -1009,6 +1015,7 @@ cloud_mode_setup_v2 = ["cloud_mode"]
 cloud_mode_input_v2 = ["cloud_mode"]
 handoff_cloud_cloud = ["cloud_mode_setup_v2"]
 git_credential_refresh = []
+source_control_panel = []
 
 [package.metadata.bundle.bin.warp-oss]
 category = "public.app-category.developer-tools"

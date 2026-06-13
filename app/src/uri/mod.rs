@@ -968,7 +968,13 @@ impl Action {
                 wait,
             } => {
                 #[cfg(feature = "local_fs")]
-                open_file_editor(primary_window_id, path.clone(), *line_col, wait.clone(), ctx);
+                open_file_editor(
+                    primary_window_id,
+                    path.clone(),
+                    *line_col,
+                    wait.clone(),
+                    ctx,
+                );
                 #[cfg(not(feature = "local_fs"))]
                 {
                     let _ = (path, line_col, wait);
