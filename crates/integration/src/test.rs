@@ -2,6 +2,20 @@
 //! src/integration.rs and src/bin/integration.rs in order to register them
 //! to be run.
 
+/// Helper: creates a setup closure that writes a Python script asset to the test
+/// directory. Defined at the shared `test` module level so sibling test modules
+/// (e.g. `keyboard_protocol`, `cmd_arrow_line_nav`) can reuse it via textual macro
+/// scoping rather than each maintaining a private copy.
+macro_rules! setup_python_script {
+    ($filename:expr, $asset_path:expr) => {
+        |utils| {
+            let script_path = utils.test_dir().join($filename);
+            let script_content = include_bytes!($asset_path);
+            std::fs::write(&script_path, script_content).expect("Failed to write test script");
+        }
+    };
+}
+
 mod agent_mode;
 mod ai_assistant;
 mod block_filtering;

@@ -344,7 +344,9 @@ integration_tests! {
     test_keyboard_protocol_alternate_keys_and_text,
 
     // Cmd+Arrow line navigation tests (Mac-only keybindings)
+    #[cfg(target_os="macos")]
     test_cmd_arrow_line_nav_line_editing,
+    #[cfg(target_os="macos")]
     test_cmd_arrow_line_nav_home_end,
 
     // Video recording test — requires real display, run manually

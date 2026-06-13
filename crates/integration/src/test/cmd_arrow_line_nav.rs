@@ -39,18 +39,6 @@ use warpui_core::{async_assert, SingletonEntity};
 use super::new_builder;
 use crate::Builder;
 
-/// Helper: creates a setup closure that writes the byte-reading Python script to
-/// the test directory.
-macro_rules! setup_read_keys_script {
-    () => {
-        |utils| {
-            let script_path = utils.test_dir().join("read_keys.py");
-            let script_content = include_bytes!("../../assets/read_keys.py");
-            std::fs::write(&script_path, script_content).expect("Failed to write test script");
-        }
-    };
-}
-
 /// Builds a step that sets `TerminalSettings.cmd_arrow_line_nav` to `value`.
 fn set_cmd_arrow_line_nav(value: CmdArrowLineNav) -> TestStep {
     new_step_with_default_assertions(&format!("Set cmd_arrow_line_nav = {value:?}")).with_action(
@@ -120,7 +108,10 @@ fn send_and_assert_bytes(
 /// cmd-right sends Ctrl-E (0x05), regardless of CLI-agent state.
 pub fn test_cmd_arrow_line_nav_line_editing() -> Builder {
     new_builder()
-        .with_setup(setup_read_keys_script!())
+        .with_setup(setup_python_script!(
+            "read_keys.py",
+            "../../assets/read_keys.py"
+        ))
         .with_step(wait_until_bootstrapped_single_pane_for_tab(0))
         .with_step(set_cmd_arrow_line_nav(CmdArrowLineNav::LineEditing))
         .with_step(run_read_keys_script())
@@ -146,22 +137,28 @@ pub fn test_cmd_arrow_line_nav_line_editing() -> Builder {
 /// cmd-right sends the End escape sequence. In the default CSI cursor mode these
 /// are `ESC [ H` (0x1b 0x5b 0x48) and `ESC [ F` (0x1b 0x5b 0x46), matching what
 /// `move_home` / `move_end` build via `EscCodes::build_escape_sequence(.., b"H"/b"F")`.
+///
+/// If the running program had enabled application-cursor mode (DECCKM), move_home /
+/// move_end would emit ESC O H / ESC O F instead; this test covers the default CSI mode.
 pub fn test_cmd_arrow_line_nav_home_end() -> Builder {
     new_builder()
-        .with_setup(setup_read_keys_script!())
+        .with_setup(setup_python_script!(
+            "read_keys.py",
+            "../../assets/read_keys.py"
+        ))
         .with_step(wait_until_bootstrapped_single_pane_for_tab(0))
         .with_step(set_cmd_arrow_line_nav(CmdArrowLineNav::HomeEnd))
         .with_step(run_read_keys_script())
         .with_step(wait_for_ready())
-        // cmd-left → Home sequence ESC [ H (0x1b 0x5b 0x48). 0x48 ('H') is the
-        // distinguishing byte vs the End sequence.
+        // cmd-left → Home sequence ESC [ H (0x1b 0x5b 0x48).
+        // 0x1b/0x5b appear in any CSI sequence; 0x48 (H) / 0x46 (F) is the distinguishing byte.
         .with_step(send_and_assert_bytes(
             "Send cmd-left (expect Home sequence ESC [ H)",
             "cmd-left",
             &["0x1b", "0x5b", "0x48"],
         ))
-        // cmd-right → End sequence ESC [ F (0x1b 0x5b 0x46). 0x46 ('F') is the
-        // distinguishing byte vs the Home sequence.
+        // cmd-right → End sequence ESC [ F (0x1b 0x5b 0x46).
+        // 0x1b/0x5b appear in any CSI sequence; 0x48 (H) / 0x46 (F) is the distinguishing byte.
         .with_step(send_and_assert_bytes(
             "Send cmd-right (expect End sequence ESC [ F)",
             "cmd-right",
