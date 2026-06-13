@@ -514,16 +514,14 @@ pub fn init(app: &mut AppContext) {
         EditableBinding::new(
             "terminal:executing_command_move_cursor_home",
             "Move cursor home within an executing command",
-            TerminalAction::ControlSequence(vec![escape_sequences::C0::SOH]),
+            TerminalAction::CmdArrowLineStart,
         )
-        // We already have bindings for home/end (the keybindings for this on Linux and Mac) that
-        // send the correct control sequence to the PTY.
         .with_mac_key_binding("cmd-left")
         .with_context_predicate(id!("Terminal") & !id!("IMEOpen") & id!("LongRunningCommand")),
         EditableBinding::new(
             "terminal:executing_command_move_cursor_end",
             "Move cursor end within an executing command",
-            TerminalAction::ControlSequence(vec![escape_sequences::C0::ENQ]),
+            TerminalAction::CmdArrowLineEnd,
         )
         .with_mac_key_binding("cmd-right")
         .with_context_predicate(id!("Terminal") & !id!("IMEOpen") & id!("LongRunningCommand")),
