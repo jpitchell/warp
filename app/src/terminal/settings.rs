@@ -262,6 +262,15 @@ define_settings_group!(TerminalSettings, settings: [
         toml_path: "terminal.osc52_clipboard_access",
         description: "Controls whether terminal programs can access the system clipboard via OSC 52 escape sequences. Options: deny (default), write_only, read_write.",
     },
+    cmd_arrow_line_nav: CmdArrowLineNavSetting {
+        type: CmdArrowLineNav,
+        default: CmdArrowLineNav::default(),
+        supported_platforms: SupportedPlatforms::ALL,
+        sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
+        private: false,
+        toml_path: "terminal.cmd_arrow_line_nav",
+        description: "What cmd+left / cmd+right send while a program is running. Options: auto (default), line_editing, home_end.",
+    },
     // Opt-in toggle for running terminal find on a background thread. Only consulted on
     // channels where `FeatureFlag::AsyncFind` is off; channels with the flag on force the
     // feature on and hide this toggle. See `is_async_find_enabled` for the composite check.
