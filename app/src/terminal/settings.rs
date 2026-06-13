@@ -180,9 +180,9 @@ impl CmdArrowLineNav {
     /// Resolve this setting (collapsing `Auto`) into the bytes to emit.
     pub fn resolve(self, is_cli_agent: bool, edge: LineEdge) -> CmdArrowResolution {
         let use_home_end = match self {
-            CmdArrowLineNav::Auto => is_cli_agent,
-            CmdArrowLineNav::LineEditing => false,
-            CmdArrowLineNav::HomeEnd => true,
+            Self::Auto => is_cli_agent,
+            Self::LineEditing => false,
+            Self::HomeEnd => true,
         };
         if use_home_end {
             CmdArrowResolution::HomeEnd
@@ -194,11 +194,12 @@ impl CmdArrowLineNav {
         }
     }
 
+    /// Returns the human-readable label for the settings-page dropdown.
     pub fn as_dropdown_label(self) -> &'static str {
         match self {
-            CmdArrowLineNav::Auto => "Auto",
-            CmdArrowLineNav::LineEditing => "Line-editing keys (Ctrl-A / Ctrl-E)",
-            CmdArrowLineNav::HomeEnd => "Home & End keys",
+            Self::Auto => "Auto",
+            Self::LineEditing => "Line-editing keys (Ctrl-A / Ctrl-E)",
+            Self::HomeEnd => "Home & End keys",
         }
     }
 }

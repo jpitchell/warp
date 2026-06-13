@@ -75,6 +75,10 @@ fn cmd_arrow_line_nav_resolves_correctly() {
         CmdArrowResolution::HomeEnd
     );
     assert_eq!(
+        CmdArrowLineNav::Auto.resolve(true, LineEdge::End),
+        CmdArrowResolution::HomeEnd
+    );
+    assert_eq!(
         CmdArrowLineNav::Auto.resolve(false, LineEdge::Start),
         CmdArrowResolution::ControlByte(0x01)
     );
