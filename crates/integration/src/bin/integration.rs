@@ -473,6 +473,14 @@ fn register_tests() -> HashMap<&'static str, BoxedBuilderFn> {
     register_test!(test_keyboard_protocol_modifier_self_bit);
     register_test!(test_keyboard_protocol_alternate_keys_and_text);
 
+    // Cmd+Arrow line navigation tests (Mac-only keybindings)
+    #[cfg(target_os = "macos")]
+    register_test!(test_cmd_arrow_line_nav_line_editing);
+    #[cfg(target_os = "macos")]
+    register_test!(test_cmd_arrow_line_nav_home_end);
+    #[cfg(target_os = "macos")]
+    register_test!(test_cmd_arrow_line_nav_auto_alt_screen);
+
     // Video recording test (manual only)
     register_test!(test_video_recording);
 

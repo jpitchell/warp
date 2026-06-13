@@ -343,6 +343,14 @@ integration_tests! {
     test_keyboard_protocol_modifier_self_bit,
     test_keyboard_protocol_alternate_keys_and_text,
 
+    // Cmd+Arrow line navigation tests (Mac-only keybindings)
+    #[cfg(target_os="macos")]
+    test_cmd_arrow_line_nav_line_editing,
+    #[cfg(target_os="macos")]
+    test_cmd_arrow_line_nav_home_end,
+    #[cfg(target_os="macos")]
+    test_cmd_arrow_line_nav_auto_alt_screen,
+
     // Video recording test — requires real display, run manually
     #[ignore = "Manual test: requires real display for frame capture"]
     test_video_recording,

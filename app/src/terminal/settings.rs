@@ -129,6 +129,87 @@ impl AltScreenPaddingMode {
     }
 }
 
+/// Which line edge a `cmd`-arrow press targets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineEdge {
+    Start,
+    End,
+}
+
+/// What a resolved `cmd`-arrow press should emit to the PTY.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CmdArrowResolution {
+    /// Send a single control byte (Ctrl-A `0x01` / Ctrl-E `0x05`).
+    ControlByte(u8),
+    /// Send the cursor-mode-aware Home/End escape sequence
+    /// (handled by `move_home` / `move_end`).
+    HomeEnd,
+}
+
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+    settings_value::SettingsValue,
+)]
+#[schemars(
+    description = "What cmd+left / cmd+right send while a program is running.",
+    rename_all = "snake_case"
+)]
+pub enum CmdArrowLineNav {
+    /// Home/End escape sequences when a CLI agent session is active or the
+    /// terminal is in the alternate screen (full-screen TUI); Ctrl-A / Ctrl-E
+    /// otherwise.
+    #[default]
+    #[schemars(description = "Smart: Home/End for full-screen TUIs & CLI agents, Ctrl-A/Ctrl-E for shells.")]
+    Auto,
+    /// Always send Ctrl-A / Ctrl-E (the historical behavior).
+    #[schemars(description = "Always send Ctrl-A / Ctrl-E line-editing control characters.")]
+    LineEditing,
+    /// Always send Home / End escape sequences.
+    #[schemars(description = "Always send Home / End escape sequences.")]
+    HomeEnd,
+}
+
+impl CmdArrowLineNav {
+    /// Resolve this setting (collapsing `Auto`) into the bytes to emit.
+    ///
+    /// `prefer_home_end` means the caller is in a Home/End-preferring context:
+    /// the alternate screen (a full-screen TUI) or a CLI agent (e.g. Claude
+    /// Code). When `Auto`, that's exactly when we send Home/End instead of the
+    /// Ctrl-A / Ctrl-E line-editing control bytes.
+    pub fn resolve(self, prefer_home_end: bool, edge: LineEdge) -> CmdArrowResolution {
+        let use_home_end = match self {
+            Self::Auto => prefer_home_end,
+            Self::LineEditing => false,
+            Self::HomeEnd => true,
+        };
+        if use_home_end {
+            CmdArrowResolution::HomeEnd
+        } else {
+            CmdArrowResolution::ControlByte(match edge {
+                LineEdge::Start => 0x01, // SOH / Ctrl-A
+                LineEdge::End => 0x05,   // ENQ / Ctrl-E
+            })
+        }
+    }
+
+    /// Returns the human-readable label for the settings-page dropdown.
+    pub fn as_dropdown_label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::LineEditing => "Line-editing keys (Ctrl-A / Ctrl-E)",
+            Self::HomeEnd => "Home & End keys",
+        }
+    }
+}
+
 define_settings_group!(TerminalSettings, settings: [
     use_audible_bell: UseAudibleBell {
         type: bool,
@@ -186,6 +267,15 @@ define_settings_group!(TerminalSettings, settings: [
         private: false,
         toml_path: "terminal.osc52_clipboard_access",
         description: "Controls whether terminal programs can access the system clipboard via OSC 52 escape sequences. Options: deny (default), write_only, read_write.",
+    },
+    cmd_arrow_line_nav: CmdArrowLineNavSetting {
+        type: CmdArrowLineNav,
+        default: CmdArrowLineNav::default(),
+        supported_platforms: SupportedPlatforms::MAC,
+        sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
+        private: false,
+        toml_path: "terminal.cmd_arrow_line_nav",
+        description: "What cmd+left / cmd+right send while a program is running. Options: auto (default), line_editing, home_end.",
     },
     // Opt-in toggle for running terminal find on a background thread. Only consulted on
     // channels where `FeatureFlag::AsyncFind` is off; channels with the flag on force the

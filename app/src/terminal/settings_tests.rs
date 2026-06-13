@@ -46,3 +46,51 @@ fn osc52_deserializes_all_variants_from_settings_value() {
 fn osc52_rejects_unknown_variant() {
     assert!(Osc52ClipboardAccess::from_file_value(&serde_json::json!("allow_all")).is_none());
 }
+
+#[test]
+fn cmd_arrow_line_nav_resolves_correctly() {
+    // The bool arg is `prefer_home_end` (true when in a Home/End-preferring
+    // context: the alternate screen or a CLI agent).
+
+    // LineEditing: always control bytes, regardless of prefer_home_end.
+    assert_eq!(
+        CmdArrowLineNav::LineEditing.resolve(true, LineEdge::Start),
+        CmdArrowResolution::ControlByte(0x01) // Ctrl-A / SOH
+    );
+    assert_eq!(
+        CmdArrowLineNav::LineEditing.resolve(false, LineEdge::End),
+        CmdArrowResolution::ControlByte(0x05) // Ctrl-E / ENQ
+    );
+
+    // HomeEnd: always Home/End escape path, regardless of prefer_home_end.
+    assert_eq!(
+        CmdArrowLineNav::HomeEnd.resolve(false, LineEdge::Start),
+        CmdArrowResolution::HomeEnd
+    );
+    assert_eq!(
+        CmdArrowLineNav::HomeEnd.resolve(true, LineEdge::End),
+        CmdArrowResolution::HomeEnd
+    );
+
+    // Auto: Home/End in a Home/End-preferring context (alt-screen or agent),
+    // control bytes otherwise.
+    assert_eq!(
+        CmdArrowLineNav::Auto.resolve(true, LineEdge::Start),
+        CmdArrowResolution::HomeEnd
+    );
+    assert_eq!(
+        CmdArrowLineNav::Auto.resolve(true, LineEdge::End),
+        CmdArrowResolution::HomeEnd
+    );
+    assert_eq!(
+        CmdArrowLineNav::Auto.resolve(false, LineEdge::Start),
+        CmdArrowResolution::ControlByte(0x01)
+    );
+    assert_eq!(
+        CmdArrowLineNav::Auto.resolve(false, LineEdge::End),
+        CmdArrowResolution::ControlByte(0x05)
+    );
+
+    // Default is Auto.
+    assert_eq!(CmdArrowLineNav::default(), CmdArrowLineNav::Auto);
+}

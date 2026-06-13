@@ -96,8 +96,9 @@ use crate::terminal::session_settings::{
     SessionSettingsChangedEvent, ShouldConfirmCloseSession,
 };
 use crate::terminal::settings::{
-    AsyncFindEnabled, MaximumGridSize, Osc52ClipboardAccess, Osc52ClipboardAccessSetting,
-    ShowTerminalZeroStateBlock, TerminalSettings, TerminalSettingsChangedEvent, UseAudibleBell,
+    AsyncFindEnabled, CmdArrowLineNav, CmdArrowLineNavSetting, MaximumGridSize,
+    Osc52ClipboardAccess, Osc52ClipboardAccessSetting, ShowTerminalZeroStateBlock,
+    TerminalSettings, TerminalSettingsChangedEvent, UseAudibleBell,
 };
 use crate::terminal::{BlockListSettings, PreserveInputFocusOnBlockSelection, SnackbarEnabled};
 use crate::undo_close::UndoCloseSettings;
@@ -797,6 +798,7 @@ pub enum FeaturesPageAction {
     SetPreferredGraphicsBackend(Option<GraphicsBackend>),
     SetNewTabPlacement(NewTabPlacement),
     SetOsc52ClipboardAccess(Osc52ClipboardAccess),
+    SetCmdArrowLineNav(CmdArrowLineNav),
     SetDefaultSessionMode(DefaultSessionMode),
     SetDefaultTabConfig(String),
     SearchForKeybinding(String),
@@ -1217,6 +1219,10 @@ impl FeaturesPageAction {
                 action: "SetOsc52ClipboardAccess".to_string(),
                 value: format!("{access:?}"),
             },
+            Self::SetCmdArrowLineNav(nav) => TelemetryEvent::FeaturesPageAction {
+                action: "SetCmdArrowLineNav".to_string(),
+                value: format!("{nav:?}"),
+            },
             Self::SetDefaultSessionMode(mode) => TelemetryEvent::FeaturesPageAction {
                 action: "SetDefaultSessionMode".to_string(),
                 value: format!("{mode:?}"),
@@ -1429,6 +1435,7 @@ pub struct FeaturesPageView {
     graphics_backend_dropdown: ViewHandle<Dropdown<FeaturesPageAction>>,
     new_tab_placement_dropdown: ViewHandle<Dropdown<FeaturesPageAction>>,
     osc52_clipboard_access_dropdown: ViewHandle<Dropdown<FeaturesPageAction>>,
+    cmd_arrow_line_nav_dropdown: ViewHandle<Dropdown<FeaturesPageAction>>,
     default_session_mode_dropdown: ViewHandle<FilterableDropdown<FeaturesPageAction>>,
     tab_behavior: Tracked<TabBehavior>,
     completions_keystroke: Tracked<String>,
@@ -1948,6 +1955,11 @@ impl TypedActionView for FeaturesPageView {
                         .set_value(*access, ctx));
                 });
             }
+            SetCmdArrowLineNav(nav) => {
+                TerminalSettings::handle(ctx).update(ctx, |terminal_settings, ctx| {
+                    report_if_error!(terminal_settings.cmd_arrow_line_nav.set_value(*nav, ctx));
+                });
+            }
             SetDefaultSessionMode(mode) => self.set_default_session_mode(mode, ctx),
             SetDefaultTabConfig(path) => {
                 AISettings::handle(ctx).update(ctx, |ai_settings, ctx| {
@@ -2298,6 +2310,15 @@ impl FeaturesPageView {
                         ctx,
                     );
                 }
+                if matches!(
+                    event,
+                    TerminalSettingsChangedEvent::CmdArrowLineNavSetting { .. }
+                ) {
+                    Self::update_cmd_arrow_line_nav_dropdown(
+                        me.cmd_arrow_line_nav_dropdown.clone(),
+                        ctx,
+                    );
+                }
                 ctx.notify()
             },
         );
@@ -2380,6 +2401,9 @@ impl FeaturesPageView {
 
         let osc52_clipboard_access_dropdown = ctx.add_typed_action_view(Dropdown::new);
         Self::update_osc52_clipboard_access_dropdown(osc52_clipboard_access_dropdown.clone(), ctx);
+
+        let cmd_arrow_line_nav_dropdown = ctx.add_typed_action_view(Dropdown::new);
+        Self::update_cmd_arrow_line_nav_dropdown(cmd_arrow_line_nav_dropdown.clone(), ctx);
 
         ctx.subscribe_to_model(&TabSettings::handle(ctx), |me, _, event, ctx| {
             if matches!(event, TabSettingsChangedEvent::NewTabPlacement { .. }) {
@@ -2665,6 +2689,7 @@ impl FeaturesPageView {
             graphics_backend_dropdown,
             new_tab_placement_dropdown,
             osc52_clipboard_access_dropdown,
+            cmd_arrow_line_nav_dropdown,
             default_session_mode_dropdown,
             tab_behavior: Default::default(),
 
@@ -2994,6 +3019,12 @@ impl FeaturesPageView {
         terminal_widgets.push(Box::new(SmartSelectWidget::default()));
         terminal_widgets.push(Box::new(CopyOnSelectWidget::default()));
         terminal_widgets.push(Box::new(Osc52ClipboardAccessWidget::default()));
+        if terminal_settings
+            .cmd_arrow_line_nav
+            .is_supported_on_current_platform()
+        {
+            terminal_widgets.push(Box::new(CmdArrowLineNavWidget::default()));
+        }
         terminal_widgets.push(Box::new(NewTabPlacementWidget::default()));
 
         let mut system_widgets: Vec<Box<dyn SettingsWidget<View = Self>>> = vec![];
@@ -3644,6 +3675,39 @@ impl FeaturesPageView {
                         DropdownItem::new(
                             val.as_dropdown_label(),
                             FeaturesPageAction::SetOsc52ClipboardAccess(val),
+                        )
+                    })
+                    .collect(),
+                ctx,
+            );
+            dropdown.set_selected_by_index(selected_index, ctx);
+        });
+    }
+
+    fn update_cmd_arrow_line_nav_dropdown(
+        dropdown: ViewHandle<Dropdown<FeaturesPageAction>>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        dropdown.update(ctx, |dropdown, ctx| {
+            let values = vec![
+                CmdArrowLineNav::Auto,
+                CmdArrowLineNav::LineEditing,
+                CmdArrowLineNav::HomeEnd,
+            ];
+            let current_value = *TerminalSettings::as_ref(ctx).cmd_arrow_line_nav;
+
+            let selected_index = values
+                .iter()
+                .position(|val| *val == current_value)
+                .unwrap_or(0);
+
+            dropdown.set_items(
+                values
+                    .into_iter()
+                    .map(|val| {
+                        DropdownItem::new(
+                            val.as_dropdown_label(),
+                            FeaturesPageAction::SetCmdArrowLineNav(val),
                         )
                     })
                     .collect(),
@@ -7364,6 +7428,42 @@ impl SettingsWidget for Osc52ClipboardAccessWidget {
             ),
             None,
             &view.osc52_clipboard_access_dropdown,
+        )
+    }
+}
+
+#[derive(Default)]
+struct CmdArrowLineNavWidget {}
+
+impl SettingsWidget for CmdArrowLineNavWidget {
+    type View = FeaturesPageView;
+
+    fn search_terms(&self) -> &str {
+        "cmd arrow left right home end line start cli agent claude code navigation"
+    }
+
+    fn render(
+        &self,
+        view: &Self::View,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        render_dropdown_item(
+            appearance,
+            "cmd+left / cmd+right in running programs",
+            Some("What cmd+left and cmd+right send while a program is running. Auto sends Home/End in full-screen (alternate-screen) apps and CLI agents like Claude Code, and Ctrl-A/Ctrl-E to shells."),
+            None,
+            LocalOnlyIconState::for_setting(
+                CmdArrowLineNavSetting::storage_key(),
+                CmdArrowLineNavSetting::sync_to_cloud(),
+                &mut view
+                    .button_mouse_states
+                    .local_only_icon_tooltip_states
+                    .borrow_mut(),
+                app,
+            ),
+            None,
+            &view.cmd_arrow_line_nav_dropdown,
         )
     }
 }
