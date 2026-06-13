@@ -7445,7 +7445,7 @@ impl SettingsWidget for CmdArrowLineNavWidget {
     ) -> Box<dyn Element> {
         render_dropdown_item(
             appearance,
-            "cmd+\u{2190} / cmd+\u{2192} in running programs",
+            "cmd+left / cmd+right in running programs",
             Some("What cmd+left and cmd+right send while a program is running. Auto sends Home/End to CLI agents like Claude Code and Ctrl-A/Ctrl-E to shells."),
             None,
             LocalOnlyIconState::for_setting(
