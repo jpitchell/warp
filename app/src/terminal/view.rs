@@ -22591,7 +22591,7 @@ impl TerminalView {
                 LineEdge::End => self.move_end(ctx),
             },
             CmdArrowResolution::ControlByte(byte) => {
-                self.write_user_bytes_to_pty(vec![byte], ctx);
+                self.control_sequence_on_terminal(&[byte], ctx);
             }
         }
     }
