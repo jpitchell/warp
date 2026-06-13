@@ -129,6 +129,80 @@ impl AltScreenPaddingMode {
     }
 }
 
+/// Which line edge a `cmd`-arrow press targets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineEdge {
+    Start,
+    End,
+}
+
+/// What a resolved `cmd`-arrow press should emit to the PTY.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CmdArrowResolution {
+    /// Send a single control byte (Ctrl-A `0x01` / Ctrl-E `0x05`).
+    ControlByte(u8),
+    /// Send the cursor-mode-aware Home/End escape sequence
+    /// (handled by `move_home` / `move_end`).
+    HomeEnd,
+}
+
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+    settings_value::SettingsValue,
+)]
+#[schemars(
+    description = "What cmd+left / cmd+right send while a program is running.",
+    rename_all = "snake_case"
+)]
+pub enum CmdArrowLineNav {
+    /// Home/End escape sequences when a CLI agent (e.g. Claude Code) owns the
+    /// session; Ctrl-A / Ctrl-E otherwise.
+    #[default]
+    #[schemars(description = "Smart: Home/End for CLI agents, Ctrl-A/Ctrl-E for shells.")]
+    Auto,
+    /// Always send Ctrl-A / Ctrl-E (the historical behavior).
+    #[schemars(description = "Always send Ctrl-A / Ctrl-E line-editing control characters.")]
+    LineEditing,
+    /// Always send Home / End escape sequences.
+    #[schemars(description = "Always send Home / End escape sequences.")]
+    HomeEnd,
+}
+
+impl CmdArrowLineNav {
+    /// Resolve this setting (collapsing `Auto`) into the bytes to emit.
+    pub fn resolve(self, is_cli_agent: bool, edge: LineEdge) -> CmdArrowResolution {
+        let use_home_end = match self {
+            CmdArrowLineNav::Auto => is_cli_agent,
+            CmdArrowLineNav::LineEditing => false,
+            CmdArrowLineNav::HomeEnd => true,
+        };
+        if use_home_end {
+            CmdArrowResolution::HomeEnd
+        } else {
+            CmdArrowResolution::ControlByte(match edge {
+                LineEdge::Start => 0x01, // SOH / Ctrl-A
+                LineEdge::End => 0x05,   // ENQ / Ctrl-E
+            })
+        }
+    }
+
+    pub fn as_dropdown_label(self) -> &'static str {
+        match self {
+            CmdArrowLineNav::Auto => "Auto",
+            CmdArrowLineNav::LineEditing => "Line-editing keys (Ctrl-A / Ctrl-E)",
+            CmdArrowLineNav::HomeEnd => "Home & End keys",
+        }
+    }
+}
+
 define_settings_group!(TerminalSettings, settings: [
     use_audible_bell: UseAudibleBell {
         type: bool,

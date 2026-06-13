@@ -46,3 +46,43 @@ fn osc52_deserializes_all_variants_from_settings_value() {
 fn osc52_rejects_unknown_variant() {
     assert!(Osc52ClipboardAccess::from_file_value(&serde_json::json!("allow_all")).is_none());
 }
+
+#[test]
+fn cmd_arrow_line_nav_resolves_correctly() {
+    // LineEditing: always control bytes, regardless of agent.
+    assert_eq!(
+        CmdArrowLineNav::LineEditing.resolve(true, LineEdge::Start),
+        CmdArrowResolution::ControlByte(0x01) // Ctrl-A / SOH
+    );
+    assert_eq!(
+        CmdArrowLineNav::LineEditing.resolve(false, LineEdge::End),
+        CmdArrowResolution::ControlByte(0x05) // Ctrl-E / ENQ
+    );
+
+    // HomeEnd: always Home/End escape path, regardless of agent.
+    assert_eq!(
+        CmdArrowLineNav::HomeEnd.resolve(false, LineEdge::Start),
+        CmdArrowResolution::HomeEnd
+    );
+    assert_eq!(
+        CmdArrowLineNav::HomeEnd.resolve(true, LineEdge::End),
+        CmdArrowResolution::HomeEnd
+    );
+
+    // Auto: Home/End when a CLI agent owns the session, control bytes otherwise.
+    assert_eq!(
+        CmdArrowLineNav::Auto.resolve(true, LineEdge::Start),
+        CmdArrowResolution::HomeEnd
+    );
+    assert_eq!(
+        CmdArrowLineNav::Auto.resolve(false, LineEdge::Start),
+        CmdArrowResolution::ControlByte(0x01)
+    );
+    assert_eq!(
+        CmdArrowLineNav::Auto.resolve(false, LineEdge::End),
+        CmdArrowResolution::ControlByte(0x05)
+    );
+
+    // Default is Auto.
+    assert_eq!(CmdArrowLineNav::default(), CmdArrowLineNav::Auto);
+}
