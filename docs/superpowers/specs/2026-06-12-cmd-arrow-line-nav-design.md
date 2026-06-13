@@ -116,13 +116,13 @@ Emits the existing `TerminalSettingsChangedEvent` pattern so the change applies 
   oss`), confirm `cmd+←/→` jump line start/end in Claude Code under `Auto`, and still work
   at the shell prompt; verify the three setting values behave as specified.
 
-### Pre-flight de-risk
+### Pre-flight de-risk — CONFIRMED ✅
 
-Before building the `HomeEnd` path, confirm that pressing the **physical Home/End keys**
-(or **fn+←/→**) already jumps to line start/end *inside Claude Code today*. Those keys send
-`ESC[H`/`ESC[F` via the existing `Home`/`End` actions; if they work, that confirms the
-escape sequence is what Claude's input expects and validates the whole approach. If Claude
-instead needs `ESC[1~`/`ESC[4~`, adjust the `HomeEnd` path accordingly.
+Confirmed (2026-06-12): the **physical Home/End keys** and **fn+←/→** already jump to line
+start/end *inside Claude Code today*. Those keys send `ESC[H`/`ESC[F` via the existing
+`Home`/`End` actions, so this confirms the escape sequence is exactly what Claude's input
+expects. The `HomeEnd` path therefore just needs to reuse `move_home`/`move_end`; no
+`ESC[1~`/`ESC[4~` fallback is required.
 
 ## Scope / non-goals
 
