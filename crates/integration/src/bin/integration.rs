@@ -478,6 +478,8 @@ fn register_tests() -> HashMap<&'static str, BoxedBuilderFn> {
     register_test!(test_cmd_arrow_line_nav_line_editing);
     #[cfg(target_os = "macos")]
     register_test!(test_cmd_arrow_line_nav_home_end);
+    #[cfg(target_os = "macos")]
+    register_test!(test_cmd_arrow_line_nav_auto_alt_screen);
 
     // Video recording test (manual only)
     register_test!(test_video_recording);

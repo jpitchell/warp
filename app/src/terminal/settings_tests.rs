@@ -49,7 +49,10 @@ fn osc52_rejects_unknown_variant() {
 
 #[test]
 fn cmd_arrow_line_nav_resolves_correctly() {
-    // LineEditing: always control bytes, regardless of agent.
+    // The bool arg is `prefer_home_end` (true when in a Home/End-preferring
+    // context: the alternate screen or a CLI agent).
+
+    // LineEditing: always control bytes, regardless of prefer_home_end.
     assert_eq!(
         CmdArrowLineNav::LineEditing.resolve(true, LineEdge::Start),
         CmdArrowResolution::ControlByte(0x01) // Ctrl-A / SOH
@@ -59,7 +62,7 @@ fn cmd_arrow_line_nav_resolves_correctly() {
         CmdArrowResolution::ControlByte(0x05) // Ctrl-E / ENQ
     );
 
-    // HomeEnd: always Home/End escape path, regardless of agent.
+    // HomeEnd: always Home/End escape path, regardless of prefer_home_end.
     assert_eq!(
         CmdArrowLineNav::HomeEnd.resolve(false, LineEdge::Start),
         CmdArrowResolution::HomeEnd
@@ -69,7 +72,8 @@ fn cmd_arrow_line_nav_resolves_correctly() {
         CmdArrowResolution::HomeEnd
     );
 
-    // Auto: Home/End when a CLI agent owns the session, control bytes otherwise.
+    // Auto: Home/End in a Home/End-preferring context (alt-screen or agent),
+    // control bytes otherwise.
     assert_eq!(
         CmdArrowLineNav::Auto.resolve(true, LineEdge::Start),
         CmdArrowResolution::HomeEnd

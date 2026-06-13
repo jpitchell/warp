@@ -22584,8 +22584,9 @@ impl TerminalView {
 
     fn cmd_arrow_line_nav(&mut self, edge: LineEdge, ctx: &mut ViewContext<Self>) {
         let setting = *TerminalSettings::as_ref(ctx).cmd_arrow_line_nav;
-        let is_cli_agent = self.has_active_cli_agent_session(ctx);
-        match setting.resolve(is_cli_agent, edge) {
+        let prefer_home_end =
+            self.has_active_cli_agent_session(ctx) || self.model.lock().is_alt_screen_active();
+        match setting.resolve(prefer_home_end, edge) {
             CmdArrowResolution::HomeEnd => match edge {
                 LineEdge::Start => self.move_home(ctx),
                 LineEdge::End => self.move_end(ctx),

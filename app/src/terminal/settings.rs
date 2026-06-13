@@ -178,9 +178,14 @@ pub enum CmdArrowLineNav {
 
 impl CmdArrowLineNav {
     /// Resolve this setting (collapsing `Auto`) into the bytes to emit.
-    pub fn resolve(self, is_cli_agent: bool, edge: LineEdge) -> CmdArrowResolution {
+    ///
+    /// `prefer_home_end` means the caller is in a Home/End-preferring context:
+    /// the alternate screen (a full-screen TUI) or a CLI agent (e.g. Claude
+    /// Code). When `Auto`, that's exactly when we send Home/End instead of the
+    /// Ctrl-A / Ctrl-E line-editing control bytes.
+    pub fn resolve(self, prefer_home_end: bool, edge: LineEdge) -> CmdArrowResolution {
         let use_home_end = match self {
-            Self::Auto => is_cli_agent,
+            Self::Auto => prefer_home_end,
             Self::LineEditing => false,
             Self::HomeEnd => true,
         };

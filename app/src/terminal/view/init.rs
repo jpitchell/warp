@@ -517,14 +517,18 @@ pub fn init(app: &mut AppContext) {
             TerminalAction::CmdArrowLineStart,
         )
         .with_mac_key_binding("cmd-left")
-        .with_context_predicate(id!("Terminal") & !id!("IMEOpen") & id!("LongRunningCommand")),
+        .with_context_predicate(
+            id!("Terminal") & !id!("IMEOpen") & (id!("LongRunningCommand") | id!("AltScreen")),
+        ),
         EditableBinding::new(
             "terminal:executing_command_move_cursor_end",
             "Move cursor end within an executing command",
             TerminalAction::CmdArrowLineEnd,
         )
         .with_mac_key_binding("cmd-right")
-        .with_context_predicate(id!("Terminal") & !id!("IMEOpen") & id!("LongRunningCommand")),
+        .with_context_predicate(
+            id!("Terminal") & !id!("IMEOpen") & (id!("LongRunningCommand") | id!("AltScreen")),
+        ),
         EditableBinding::new(
             "terminal:executing_command_delete_word_left",
             "Delete word left within an executing command",

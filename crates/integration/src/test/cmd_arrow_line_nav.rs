@@ -79,6 +79,54 @@ fn wait_for_ready() -> TestStep {
         .set_timeout(Duration::from_secs(5))
 }
 
+/// Builds a step that launches `read_keys_alt_screen.py` as a long-running
+/// command, then waits until the terminal is actually in the alternate screen
+/// and the script has printed its "Ready" marker into the alt-screen grid.
+fn run_read_keys_alt_screen_script() -> TestStep {
+    TestStep::new("Execute read_keys_alt_screen.py")
+        .with_typed_characters(&["python3 ~/read_keys_alt_screen.py"])
+        .with_keystrokes(&["enter"])
+        .set_timeout(Duration::from_secs(10))
+        .add_assertion(|app, window_id| {
+            let terminal_view = single_terminal_view_for_tab(app, window_id, 0);
+            terminal_view.read(app, |view, _ctx| {
+                let model = view.model.lock();
+                let is_alt = model.is_alt_screen_active();
+                let output = model.alt_screen().output_to_string();
+                async_assert!(
+                    is_alt && output.contains("Ready"),
+                    "Script should be in alt-screen and ready, but alt_screen_active={is_alt}, \
+                     alt-screen output was: {output}"
+                )
+            })
+        })
+}
+
+/// Builds a step that sends `keystroke` then asserts the script's *alt-screen*
+/// output contains each of the `expected_bytes` hex strings (e.g. `"0x1b"`).
+fn send_and_assert_alt_screen_bytes(
+    description: &'static str,
+    keystroke: &'static str,
+    expected_bytes: &'static [&'static str],
+) -> TestStep {
+    TestStep::new(description)
+        .with_keystrokes(&[keystroke])
+        .set_timeout(Duration::from_secs(5))
+        .add_assertion(move |app, window_id| {
+            let terminal_view = single_terminal_view_for_tab(app, window_id, 0);
+            terminal_view.read(app, |view, _ctx| {
+                let model = view.model.lock();
+                let output = model.alt_screen().output_to_string();
+                let all_present = expected_bytes.iter().all(|b| output.contains(b));
+                async_assert!(
+                    all_present,
+                    "{description}: expected alt-screen output to contain bytes \
+                     {expected_bytes:?}, but output was: {output}"
+                )
+            })
+        })
+}
+
 /// Builds a step that sends `keystroke` then asserts the script's output contains
 /// each of the `expected_bytes` hex strings (e.g. `"0x01"`).
 fn send_and_assert_bytes(
@@ -127,6 +175,45 @@ pub fn test_cmd_arrow_line_nav_line_editing() -> Builder {
             "Send cmd-right (expect Ctrl-E / 0x05)",
             "cmd-right",
             &["0x05"],
+        ))
+        .with_step(
+            new_step_with_default_assertions("Send Ctrl+C to exit").with_keystrokes(&["ctrl-c"]),
+        )
+}
+
+/// `cmd_arrow_line_nav = Auto` while a full-screen (alternate-screen) program
+/// owns the terminal: cmd-left / cmd-right must resolve to the Home / End
+/// escape sequences (`ESC [ H` / `ESC [ F`), NOT the Ctrl-A / Ctrl-E control
+/// bytes and NOT a plain left/right arrow.
+///
+/// This is the regression test for the bug where alt-screen apps (e.g. Claude
+/// Code) never received Home/End: the `LongRunningCommand` context key is only
+/// set when NOT in alt-screen, so the cmd-arrow bindings (gated on
+/// `LongRunningCommand`) never fired and the keystroke fell through to the
+/// plain arrow binding. The fix gates the bindings on
+/// `(LongRunningCommand | AltScreen)` and makes `Auto` prefer Home/End in
+/// alt-screen as well as for CLI agents.
+pub fn test_cmd_arrow_line_nav_auto_alt_screen() -> Builder {
+    new_builder()
+        .with_setup(setup_python_script!(
+            "read_keys_alt_screen.py",
+            "../../assets/read_keys_alt_screen.py"
+        ))
+        .with_step(wait_until_bootstrapped_single_pane_for_tab(0))
+        // Explicitly set the default so the test is robust to default changes.
+        .with_step(set_cmd_arrow_line_nav(CmdArrowLineNav::Auto))
+        .with_step(run_read_keys_alt_screen_script())
+        // cmd-left → Home sequence ESC [ H (0x1b 0x5b 0x48).
+        .with_step(send_and_assert_alt_screen_bytes(
+            "Send cmd-left in alt-screen (expect Home sequence ESC [ H)",
+            "cmd-left",
+            &["0x1b", "0x5b", "0x48"],
+        ))
+        // cmd-right → End sequence ESC [ F (0x1b 0x5b 0x46).
+        .with_step(send_and_assert_alt_screen_bytes(
+            "Send cmd-right in alt-screen (expect End sequence ESC [ F)",
+            "cmd-right",
+            &["0x1b", "0x5b", "0x46"],
         ))
         .with_step(
             new_step_with_default_assertions("Send Ctrl+C to exit").with_keystrokes(&["ctrl-c"]),
