@@ -22,6 +22,9 @@ use crate::Builder;
 
 const TEST_FILE_NAME: &str = "tracked.txt";
 const COMMIT_MESSAGE: &str = "integration test commit";
+/// Step-data key: whether `refresh_in_flight` was observed true synchronously
+/// right after dispatching `Refresh`.
+const REFRESH_WENT_IN_FLIGHT_KEY: &str = "refresh_went_in_flight";
 
 fn run_git(repo_dir: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -144,6 +147,56 @@ pub fn test_source_control_panel_stage_and_commit() -> Builder {
                     async_assert!(
                         panel_shows_file(app, window_id, Section::Changes, TEST_FILE_NAME),
                         "expected '{TEST_FILE_NAME}' as an unstaged change in the panel"
+                    )
+                }),
+        )
+        .with_step(
+            // Dispatching Refresh sets `refresh_in_flight` synchronously and
+            // spawns the status reload; the spawned future doesn't run inline,
+            // so the flag is observably true right after dispatch and clears
+            // once the reload emits `StatusChanged`. This exercises the Refresh
+            // button's loading indicator (icon swap + disabled click).
+            TestStep::new("Refresh shows an in-flight indicator, then settles")
+                .with_action(|app, window_id, step_data| {
+                    let view = source_control_view(app, window_id);
+                    app.update(|ctx| {
+                        ctx.dispatch_typed_action_for_view(
+                            window_id,
+                            view.id(),
+                            &SourceControlViewAction::Refresh,
+                        );
+                    });
+                    let in_flight =
+                        view.read(app, |view, _ctx| view.integration_refresh_in_flight());
+                    step_data.insert(REFRESH_WENT_IN_FLIGHT_KEY, in_flight);
+                })
+                .set_timeout(Duration::from_secs(20))
+                .add_named_assertion_with_data_from_prior_step(
+                    "refresh entered the in-flight state",
+                    |_app, _window_id, step_data| {
+                        let went_in_flight = step_data
+                            .get::<_, bool>(REFRESH_WENT_IN_FLIGHT_KEY)
+                            .copied()
+                            .unwrap_or(false);
+                        async_assert!(
+                            went_in_flight,
+                            "expected refresh_in_flight to be true immediately after dispatching Refresh"
+                        )
+                    },
+                )
+                .add_named_assertion("refresh settled back to idle", |app, window_id| {
+                    let view = source_control_view(app, window_id);
+                    let in_flight =
+                        view.read(app, |view, _ctx| view.integration_refresh_in_flight());
+                    async_assert!(
+                        !in_flight,
+                        "expected refresh_in_flight to clear once the status reload completes"
+                    )
+                })
+                .add_named_assertion("modified file still listed after refresh", |app, window_id| {
+                    async_assert!(
+                        panel_shows_file(app, window_id, Section::Changes, TEST_FILE_NAME),
+                        "expected '{TEST_FILE_NAME}' to remain an unstaged change after refresh"
                     )
                 }),
         )

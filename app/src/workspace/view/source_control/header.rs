@@ -197,6 +197,8 @@ impl HeaderState {
         &self,
         branch: Option<&BranchStatus>,
         busy: bool,
+        sync_in_flight: bool,
+        refresh_in_flight: bool,
         appearance: &Appearance,
         app: &AppContext,
     ) -> Box<dyn Element> {
@@ -221,63 +223,75 @@ impl HeaderState {
             let intent = SyncIntent::from_branch(branch);
             if intent != SyncIntent::UpToDate {
                 let tooltip = ui_builder.tool_tip(intent.tooltip().to_string()).build();
-                let mut sync_button = match intent {
-                    SyncIntent::Publish => icon_button_with_color(
+                // While the sync chain runs, replace the counters/upload-cloud
+                // with a loading glyph; `busy` already drops the click handler.
+                let mut sync_button = if sync_in_flight {
+                    icon_button_with_color(
                         appearance,
-                        Icon::UploadCloud,
+                        Icon::Loading,
                         false,
                         self.sync_button_state.clone(),
                         theme.sub_text_color(theme.background()),
-                    ),
-                    _ => {
-                        // Pull count first to match the action order.
-                        let count_font_size = appearance.ui_font_size() - 1.;
-                        let mut counters = Flex::row()
-                            .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                            .with_main_axis_size(MainAxisSize::Min)
-                            .with_spacing(4.);
-                        if branch.behind > 0 {
-                            counters.add_child(
-                                Text::new_inline(
-                                    format!("\u{2193}{}", branch.behind),
-                                    font,
-                                    count_font_size,
-                                )
-                                .with_color(theme.ansi_fg_yellow())
-                                .finish(),
-                            );
-                        }
-                        if branch.ahead > 0 {
-                            counters.add_child(
-                                Text::new_inline(
-                                    format!("\u{2191}{}", branch.ahead),
-                                    font,
-                                    count_font_size,
-                                )
-                                .with_color(theme.ansi_fg_green())
-                                .finish(),
-                            );
-                        }
-                        let pill_styles = || {
-                            UiComponentStyles::default()
-                                .set_height(22.)
-                                .set_border_width(0.)
-                                .set_padding(Coords {
-                                    top: 3.,
-                                    bottom: 3.,
-                                    left: 6.,
-                                    right: 6.,
-                                })
-                                .set_border_radius(CornerRadius::with_all(Radius::Pixels(4.)))
-                        };
-                        Button::new(
+                    )
+                } else {
+                    match intent {
+                        SyncIntent::Publish => icon_button_with_color(
+                            appearance,
+                            Icon::UploadCloud,
+                            false,
                             self.sync_button_state.clone(),
-                            pill_styles(),
-                            Some(pill_styles().set_background(theme.surface_2().into())),
-                            Some(pill_styles().set_background(theme.surface_3().into())),
-                            Some(pill_styles()),
-                        )
-                        .with_custom_label(counters.finish())
+                            theme.sub_text_color(theme.background()),
+                        ),
+                        _ => {
+                            // Pull count first to match the action order.
+                            let count_font_size = appearance.ui_font_size() - 1.;
+                            let mut counters = Flex::row()
+                                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                                .with_main_axis_size(MainAxisSize::Min)
+                                .with_spacing(4.);
+                            if branch.behind > 0 {
+                                counters.add_child(
+                                    Text::new_inline(
+                                        format!("\u{2193}{}", branch.behind),
+                                        font,
+                                        count_font_size,
+                                    )
+                                    .with_color(theme.ansi_fg_yellow())
+                                    .finish(),
+                                );
+                            }
+                            if branch.ahead > 0 {
+                                counters.add_child(
+                                    Text::new_inline(
+                                        format!("\u{2191}{}", branch.ahead),
+                                        font,
+                                        count_font_size,
+                                    )
+                                    .with_color(theme.ansi_fg_green())
+                                    .finish(),
+                                );
+                            }
+                            let pill_styles = || {
+                                UiComponentStyles::default()
+                                    .set_height(22.)
+                                    .set_border_width(0.)
+                                    .set_padding(Coords {
+                                        top: 3.,
+                                        bottom: 3.,
+                                        left: 6.,
+                                        right: 6.,
+                                    })
+                                    .set_border_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+                            };
+                            Button::new(
+                                self.sync_button_state.clone(),
+                                pill_styles(),
+                                Some(pill_styles().set_background(theme.surface_2().into())),
+                                Some(pill_styles().set_background(theme.surface_3().into())),
+                                Some(pill_styles()),
+                            )
+                            .with_custom_label(counters.finish())
+                        }
                     }
                 };
                 sync_button = sync_button.with_tooltip(move || tooltip.finish());
@@ -336,20 +350,30 @@ impl HeaderState {
 
         let icon_color = theme.sub_text_color(theme.background());
         let refresh_tooltip = ui_builder.tool_tip("Refresh".to_string()).build();
-        let refresh_button = icon_button_with_color(
+        let refresh_icon = if refresh_in_flight {
+            Icon::Loading
+        } else {
+            Icon::Refresh
+        };
+        let mut refresh_button = icon_button_with_color(
             appearance,
-            Icon::Refresh,
+            refresh_icon,
             false,
             self.refresh_button_state.clone(),
             icon_color,
         )
         .with_tooltip(move || refresh_tooltip.finish())
-        .build()
-        .on_click(|ctx, _, _| {
-            ctx.dispatch_typed_action(SourceControlViewAction::Refresh);
-        })
-        .with_cursor(Cursor::PointingHand)
-        .finish();
+        .build();
+        // Don't re-fire a refresh while one is running, or during any other
+        // mutating operation.
+        if !busy && !refresh_in_flight {
+            refresh_button = refresh_button
+                .on_click(|ctx, _, _| {
+                    ctx.dispatch_typed_action(SourceControlViewAction::Refresh);
+                })
+                .with_cursor(Cursor::PointingHand);
+        }
+        let refresh_button = refresh_button.finish();
         row.add_child(
             ConstrainedBox::new(refresh_button)
                 .with_width(22.)

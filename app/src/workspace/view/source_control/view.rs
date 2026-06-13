@@ -170,6 +170,9 @@ pub struct SourceControlView {
     dialog: DialogState,
     /// True while a view-driven sync (pull/push) chain is in flight.
     sync_in_flight: bool,
+    /// True while a user-initiated refresh is in flight (set when the Refresh
+    /// button is pressed, cleared on the next `StatusChanged`).
+    refresh_in_flight: bool,
     /// Needed by `keymap_context` to look up the focused view.
     window_id: warpui::WindowId,
 }
@@ -286,6 +289,7 @@ impl SourceControlView {
             commit_box,
             dialog,
             sync_in_flight: false,
+            refresh_in_flight: false,
             window_id: ctx.window_id(),
         }
     }
@@ -431,6 +435,9 @@ impl SourceControlView {
     fn handle_model_event(&mut self, event: &SourceControlEvent, ctx: &mut ViewContext<Self>) {
         match event {
             SourceControlEvent::StatusChanged => {
+                // A refresh has produced fresh status; clear the in-flight flag
+                // so the Refresh button reverts from its loading state.
+                self.refresh_in_flight = false;
                 self.rebuild_list_items(ctx);
             }
             SourceControlEvent::OperationFinished { kind, result } => {
@@ -1043,7 +1050,10 @@ impl SourceControlView {
             }
             Action::Refresh => {
                 if let Some(model) = self.model().cloned() {
+                    self.refresh_in_flight = true;
                     model.update(ctx, |m, ctx| m.refresh(ctx));
+                    self.refresh_controls(ctx);
+                    ctx.notify();
                 }
             }
             Action::SwitchBranch(branch) => {
@@ -1319,9 +1329,14 @@ impl SourceControlView {
         let busy = self.busy(app);
         let branch_status = model.as_ref(app).status().map(|s| s.branch.clone());
 
-        let header = self
-            .header
-            .render(branch_status.as_ref(), busy, appearance, app);
+        let header = self.header.render(
+            branch_status.as_ref(),
+            busy,
+            self.sync_in_flight,
+            self.refresh_in_flight,
+            appearance,
+            app,
+        );
         let commit_box = self.commit_box.render(appearance, app);
 
         let list_items = self.list_items.clone();
@@ -1550,6 +1565,12 @@ impl SourceControlView {
         self.commit_box.message_editor.update(ctx, |editor, ctx| {
             editor.system_reset_buffer_text(text, ctx);
         });
+    }
+
+    /// Integration-test accessor: whether a user-initiated refresh is in
+    /// flight (drives the Refresh button's loading indicator).
+    pub fn integration_refresh_in_flight(&self) -> bool {
+        self.refresh_in_flight
     }
 }
 
