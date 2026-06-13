@@ -184,6 +184,10 @@ pub enum TerminalAction {
     PageDown,
     Home,
     End,
+    /// `cmd+left` in a running program: jump to line start (setting-dependent).
+    CmdArrowLineStart,
+    /// `cmd+right` in a running program: jump to line end (setting-dependent).
+    CmdArrowLineEnd,
     KeyboardSelectText(SelectionDirection),
     UserInputSequence(Vec<u8>),
     ControlSequence(Vec<u8>),
@@ -558,6 +562,8 @@ impl fmt::Debug for TerminalAction {
             PageDown => f.write_str("PageDown"),
             Home => f.write_str("Home"),
             End => f.write_str("End"),
+            CmdArrowLineStart => f.write_str("CmdArrowLineStart"),
+            CmdArrowLineEnd => f.write_str("CmdArrowLineEnd"),
             KeyboardSelectText(direction) => write!(f, "KeyboardSelectText({direction:?})"),
             ContextMenu(action) => write!(f, "ContextMenu({action:?})"),
             CtrlD => f.write_str("CtrlD"),

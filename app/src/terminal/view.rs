@@ -468,7 +468,9 @@ use crate::terminal::session_settings::{
     NotificationsMode, NotificationsSettings, SessionSettings, SessionSettingsChangedEvent,
     ToolbarChipSelection, DEFAULT_THRESHOLD_FOR_LONG_RUNNING_NOTIFICATION,
 };
-use crate::terminal::settings::{TerminalSettings, TerminalSettingsChangedEvent};
+use crate::terminal::settings::{
+    CmdArrowResolution, LineEdge, TerminalSettings, TerminalSettingsChangedEvent,
+};
 use crate::terminal::shared_session::role_change_modal::{
     RoleChangeCloseSource, RoleChangeOpenSource,
 };
@@ -22580,6 +22582,20 @@ impl TerminalView {
         }
     }
 
+    fn cmd_arrow_line_nav(&mut self, edge: LineEdge, ctx: &mut ViewContext<Self>) {
+        let setting = *TerminalSettings::as_ref(ctx).cmd_arrow_line_nav;
+        let is_cli_agent = self.has_active_cli_agent_session(ctx);
+        match setting.resolve(is_cli_agent, edge) {
+            CmdArrowResolution::HomeEnd => match edge {
+                LineEdge::Start => self.move_home(ctx),
+                LineEdge::End => self.move_end(ctx),
+            },
+            CmdArrowResolution::ControlByte(byte) => {
+                self.write_user_bytes_to_pty(vec![byte], ctx);
+            }
+        }
+    }
+
     fn keyboard_select_text(
         &mut self,
         ctx: &mut ViewContext<Self>,
@@ -26205,6 +26221,8 @@ impl TypedActionView for TerminalView {
             | PageDown
             | Home
             | End
+            | CmdArrowLineStart
+            | CmdArrowLineEnd
             | KeyboardSelectText(_)
             | ContextMenu(_)
             | SplitRight(_)
@@ -26572,6 +26590,8 @@ impl TypedActionView for TerminalView {
             PageDown => self.page_down(ctx),
             Home => self.move_home(ctx),
             End => self.move_end(ctx),
+            CmdArrowLineStart => self.cmd_arrow_line_nav(LineEdge::Start, ctx),
+            CmdArrowLineEnd => self.cmd_arrow_line_nav(LineEdge::End, ctx),
             KeyboardSelectText(direction) => self.keyboard_select_text(ctx, direction),
             SelectBookmarkUp => match input_mode {
                 InputMode::PinnedToBottom | InputMode::Waterfall => self.bookmark_up(ctx),
