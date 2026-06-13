@@ -3019,7 +3019,12 @@ impl FeaturesPageView {
         terminal_widgets.push(Box::new(SmartSelectWidget::default()));
         terminal_widgets.push(Box::new(CopyOnSelectWidget::default()));
         terminal_widgets.push(Box::new(Osc52ClipboardAccessWidget::default()));
-        terminal_widgets.push(Box::new(CmdArrowLineNavWidget::default()));
+        if terminal_settings
+            .cmd_arrow_line_nav
+            .is_supported_on_current_platform()
+        {
+            terminal_widgets.push(Box::new(CmdArrowLineNavWidget::default()));
+        }
         terminal_widgets.push(Box::new(NewTabPlacementWidget::default()));
 
         let mut system_widgets: Vec<Box<dyn SettingsWidget<View = Self>>> = vec![];
@@ -7446,7 +7451,7 @@ impl SettingsWidget for CmdArrowLineNavWidget {
         render_dropdown_item(
             appearance,
             "cmd+left / cmd+right in running programs",
-            Some("What cmd+left and cmd+right send while a program is running. Auto sends Home/End to CLI agents like Claude Code and Ctrl-A/Ctrl-E to shells."),
+            Some("What cmd+left and cmd+right send while a program is running. Auto sends Home/End in full-screen (alternate-screen) apps and CLI agents like Claude Code, and Ctrl-A/Ctrl-E to shells."),
             None,
             LocalOnlyIconState::for_setting(
                 CmdArrowLineNavSetting::storage_key(),

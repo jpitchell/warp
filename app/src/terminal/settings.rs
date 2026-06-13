@@ -163,10 +163,11 @@ pub enum CmdArrowResolution {
     rename_all = "snake_case"
 )]
 pub enum CmdArrowLineNav {
-    /// Home/End escape sequences when a CLI agent (e.g. Claude Code) owns the
-    /// session; Ctrl-A / Ctrl-E otherwise.
+    /// Home/End escape sequences when a CLI agent session is active or the
+    /// terminal is in the alternate screen (full-screen TUI); Ctrl-A / Ctrl-E
+    /// otherwise.
     #[default]
-    #[schemars(description = "Smart: Home/End for CLI agents, Ctrl-A/Ctrl-E for shells.")]
+    #[schemars(description = "Smart: Home/End for full-screen TUIs & CLI agents, Ctrl-A/Ctrl-E for shells.")]
     Auto,
     /// Always send Ctrl-A / Ctrl-E (the historical behavior).
     #[schemars(description = "Always send Ctrl-A / Ctrl-E line-editing control characters.")]
@@ -270,7 +271,7 @@ define_settings_group!(TerminalSettings, settings: [
     cmd_arrow_line_nav: CmdArrowLineNavSetting {
         type: CmdArrowLineNav,
         default: CmdArrowLineNav::default(),
-        supported_platforms: SupportedPlatforms::ALL,
+        supported_platforms: SupportedPlatforms::MAC,
         sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
         private: false,
         toml_path: "terminal.cmd_arrow_line_nav",

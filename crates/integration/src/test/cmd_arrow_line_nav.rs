@@ -6,8 +6,8 @@
 //! bytes the child process actually receives.
 //!
 //! The `cmd-left` / `cmd-right` bindings are registered with `with_mac_key_binding`
-//! and gated by the `id!("Terminal") & !id!("IMEOpen") & id!("LongRunningCommand")`
-//! context, so these tests only run on macOS while a long-running command owns the
+//! and gated by the `id!("Terminal") & !id!("IMEOpen") & (id!("LongRunningCommand") | id!("AltScreen"))`
+//! context, so these tests only run on macOS while a running program owns the
 //! terminal.
 //!
 //! Coverage notes:
@@ -117,11 +117,22 @@ fn send_and_assert_alt_screen_bytes(
             terminal_view.read(app, |view, _ctx| {
                 let model = view.model.lock();
                 let output = model.alt_screen().output_to_string();
-                let all_present = expected_bytes.iter().all(|b| output.contains(b));
+                let observed: Vec<&str> = output
+                    .match_indices("0x")
+                    .filter_map(|(i, _)| output.get(i..i + 4))
+                    .collect();
+                let tail: Vec<&str> = observed
+                    .iter()
+                    .rev()
+                    .take(expected_bytes.len())
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
                 async_assert!(
-                    all_present,
-                    "{description}: expected alt-screen output to contain bytes \
-                     {expected_bytes:?}, but output was: {output}"
+                    tail == expected_bytes,
+                    "{description}: expected last bytes {expected_bytes:?}, got {tail:?}. Output was: {output}"
                 )
             })
         })
@@ -142,11 +153,22 @@ fn send_and_assert_bytes(
             terminal_view.read(app, |view, _ctx| {
                 let model = view.model.lock();
                 let output = model.block_list().active_block().output_to_string();
-                let all_present = expected_bytes.iter().all(|b| output.contains(b));
+                let observed: Vec<&str> = output
+                    .match_indices("0x")
+                    .filter_map(|(i, _)| output.get(i..i + 4))
+                    .collect();
+                let tail: Vec<&str> = observed
+                    .iter()
+                    .rev()
+                    .take(expected_bytes.len())
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
                 async_assert!(
-                    all_present,
-                    "{description}: expected output to contain bytes {expected_bytes:?}, but \
-                     output was: {output}"
+                    tail == expected_bytes,
+                    "{description}: expected last bytes {expected_bytes:?}, got {tail:?}. Output was: {output}"
                 )
             })
         })
