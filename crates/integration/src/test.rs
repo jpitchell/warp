@@ -6,6 +6,8 @@ mod agent_mode;
 mod ai_assistant;
 mod block_filtering;
 mod bootstrapping;
+#[cfg(target_os = "macos")]
+mod cmd_arrow_line_nav;
 mod code_review;
 mod ctrl_d;
 mod edit_wait;
@@ -49,6 +51,8 @@ pub use ai_assistant::*;
 use anyhow::{anyhow, Result};
 pub use block_filtering::*;
 pub use bootstrapping::*;
+#[cfg(target_os = "macos")]
+pub use cmd_arrow_line_nav::*;
 pub use code_review::*;
 pub use ctrl_d::*;
 pub use edit_wait::*;
