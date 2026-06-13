@@ -500,7 +500,7 @@ impl LeftPanelView {
                 ];
 
                 ToolbeltButtonConfig {
-                    icon: Icon::GitBranch,
+                    icon: Icon::SourceControl,
                     active_icon: None,
                     tooltip_text: "Source control".to_string(),
                     action: LeftPanelAction::SourceControl,

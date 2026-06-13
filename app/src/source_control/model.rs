@@ -76,6 +76,11 @@ pub enum SourceControlEvent {
         kind: GitOpKind,
         result: Result<(), String>,
     },
+    /// Emitted when a background refresh could not read repo status. The
+    /// in-flight refresh still completes (the cache reverts to empty), but the
+    /// view surfaces this so the Refresh spinner doesn't quietly clear with no
+    /// explanation.
+    RefreshFailed(String),
 }
 
 // ── SourceControlCacheModel (singleton) ──────────────────────────────────────
@@ -192,6 +197,9 @@ struct RefreshResult {
     worktrees: Vec<WorktreeEntry>,
     history: Vec<CommitEntry>,
     branches: Vec<BranchEntry>,
+    /// Set when the primary `git status` read failed. The secondary reads
+    /// (stash/worktree/branches/history) degrade silently to empty defaults.
+    error: Option<String>,
 }
 
 #[cfg(feature = "local_fs")]
@@ -371,7 +379,10 @@ impl SourceControlModel {
 
         match run_git_command(&repo_path, &["status", "--porcelain=v2", "--branch", "-z"]).await {
             Ok(output) => result.status = Some(parse_porcelain_v2(&output)),
-            Err(err) => log::warn!("SourceControlModel: git status failed: {err}"),
+            Err(err) => {
+                log::warn!("SourceControlModel: git status failed: {err}");
+                result.error = Some(format!("Couldn't refresh source control: {err}"));
+            }
         }
 
         result.stashes = git_ops::stash_list(&repo_path).await.unwrap_or_default();
@@ -398,6 +409,12 @@ impl SourceControlModel {
         self.branches = result.branches;
         if self.history_enabled {
             self.history = result.history;
+        }
+        if let Some(err) = result.error {
+            self.last_error = Some(err.clone());
+            ctx.emit(SourceControlEvent::RefreshFailed(err));
+        } else {
+            self.last_error = None;
         }
         ctx.emit(SourceControlEvent::StatusChanged);
     }

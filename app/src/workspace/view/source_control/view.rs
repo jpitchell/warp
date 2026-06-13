@@ -440,6 +440,12 @@ impl SourceControlView {
                 self.refresh_in_flight = false;
                 self.rebuild_list_items(ctx);
             }
+            SourceControlEvent::RefreshFailed(err) => {
+                // The trailing `StatusChanged` clears `refresh_in_flight` and
+                // rebuilds the list; here we just surface why the refresh that
+                // reset the spinner came back empty.
+                self.show_error_toast(err.clone(), ctx);
+            }
             SourceControlEvent::OperationFinished { kind, result } => {
                 match result {
                     Err(err) => self.show_error_toast(err.clone(), ctx),
