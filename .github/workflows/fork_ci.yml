@@ -1,0 +1,132 @@
+# Self-contained CI for forks.
+#
+# Unlike the upstream `ci.yml` (which only triggers on PRs to `master`/release
+# branches and depends on Warp's private infra — self-hosted mac runners,
+# `ubuntu-latest-large`, the GCP `warp-ssh-integration-testing` service account,
+# and the Trunk `TRUNK_API_TOKEN` secret), this workflow runs entirely on
+# GitHub-hosted runners and needs NO secrets beyond the built-in GITHUB_TOKEN.
+#
+# It triggers on PRs targeting this fork's mainline (`fork/main`) and runs:
+#   - lints:  ./script/format --check  +  cargo clippy -D warnings
+#   - tests:  cargo nextest, unit tests only
+#
+# Integration tests (`package(integration)`) are intentionally skipped: they
+# need a GCP service account (SSH tests), a deployed remote server, and a real
+# GPU display — none of which exist on a fork's free runners.
+#
+# Known limitation: the shared `prepare_environment` action only saves its Rust
+# build cache on `refs/heads/master`, so on this fork builds are uncached and
+# slower. That's acceptable for now; flip to a fork-specific cache key later if
+# the minutes become a problem.
+
+name: Fork CI
+
+on:
+  pull_request:
+    branches:
+      - "fork/main"
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+  push:
+    branches:
+      - "fork/main"
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Keep these in sync with upstream ci.yml.
+  WORKSPACE_TEST_ARGS: --workspace --locked --exclude command-signatures-v2
+  # Include only as much debug info as is necessary for backtraces; speeds up
+  # compilation and shrinks artifacts so we don't run out of runner disk.
+  RUSTFLAGS: -C debuginfo=line-tables-only --cfg=web_sys_unstable_apis
+
+jobs:
+  lints:
+    name: Formatting + Clippy (Linux)
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free up disk space
+        # Warp's workspace is large; reclaim space from preinstalled toolchains
+        # we don't use so the build doesn't run out of disk.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: ./.github/actions/prepare_environment
+        with:
+          target_os: linux
+          is_self_hosted: false
+
+      - name: Ensure Cargo.lock is up-to-date
+        run: |
+          cargo metadata --locked --format-version=1 > /dev/null \
+            || (echo "::error::Cargo.lock is out-of-date with Cargo.toml. Run 'cargo check' to update." && exit 1)
+
+      - name: Run ./script/format --check
+        shell: bash
+        run: ./script/format --check
+
+      - name: Run cargo clippy
+        shell: bash
+        run: |
+          set -e
+          cargo clippy --locked --workspace --exclude warp_completer --all-targets --tests -- -D warnings
+          # warp_completer has feature-gated WIP completions-on-js logic, so lint
+          # it with default (not all) features, matching upstream ci.yml.
+          cargo clippy --locked -p warp_completer --all-targets --tests -- -D warnings
+        env:
+          # Avoid GitHub API rate limits while fetching build-time binaries.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  tests:
+    name: Unit tests (Linux)
+    timeout-minutes: 90
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: ./.github/actions/prepare_environment
+        with:
+          target_os: linux
+          is_self_hosted: false
+          install_test_deps: true
+
+      - name: Install cargo nextest
+        uses: taiki-e/install-action@9a29ce630c67077a359246f3e4f84941e05f28b5 # v1
+        with:
+          tool: nextest
+
+      - name: Resolve a default shell for unit tests
+        # Unit tests may spawn a shell but shouldn't care which; zsh has the
+        # shortest bootstrap and is installed by script/linux/install_test_deps.
+        shell: bash
+        run: echo "WARP_SHELL_PATH=$(command -v zsh)" >> "$GITHUB_ENV"
+
+      - name: Compile tests
+        run: cargo nextest run ${{ env.WORKSPACE_TEST_ARGS }} --no-run
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run unit tests
+        if: success()
+        # Skip the `integration` package: its SSH/remote-server/real-display
+        # tests can't run on a fork's free runners.
+        run: cargo nextest run ${{ env.WORKSPACE_TEST_ARGS }} -E "not package(integration)"

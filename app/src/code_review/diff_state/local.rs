@@ -11,13 +11,12 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use instant::Instant;
-#[cfg(feature = "local_fs")]
-use warp_util::standardized_path::StandardizedPath;
-
 use warp_core::send_telemetry_from_ctx;
 #[cfg(feature = "local_fs")]
 use warp_core::sync_queue::SyncQueue;
 use warp_util::git::run_git_command;
+#[cfg(feature = "local_fs")]
+use warp_util::standardized_path::StandardizedPath;
 use warpui::r#async::SpawnedFutureHandle;
 #[cfg(not(target_arch = "wasm32"))]
 use warpui::AppContext;
