@@ -171,7 +171,7 @@ fn forward_or_spawn(url: &str) -> anyhow::Result<()> {
     {
         // LaunchServices routes the custom scheme to the running instance or
         // launches a new one. `-g` keeps focus in the terminal, not Warp.
-        std::process::Command::new("/usr/bin/open")
+        command::blocking::Command::new("/usr/bin/open")
             .arg("-g")
             .arg(url)
             .spawn()?
@@ -196,7 +196,11 @@ fn spawn_detached_gui(url: &str) -> anyhow::Result<()> {
     use std::process::Stdio;
 
     let exe = std::env::current_exe()?;
-    let mut cmd = std::process::Command::new(&exe);
+    // Use the project's allowed Command wrapper (not std::process::Command, which
+    // is disallowed by clippy because it flashes a console window on Windows). The
+    // wrapper exposes `pre_exec` and `creation_flags` as inherent methods, so the
+    // std `CommandExt` traits are no longer imported.
+    let mut cmd = command::blocking::Command::new(&exe);
     cmd.arg(url)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -204,7 +208,6 @@ fn spawn_detached_gui(url: &str) -> anyhow::Result<()> {
 
     #[cfg(unix)]
     {
-        use std::os::unix::process::CommandExt as _;
         // Safety: `setsid` is async-signal-safe and detaches the child into its
         // own session so it survives this process exiting.
         unsafe {
@@ -216,7 +219,6 @@ fn spawn_detached_gui(url: &str) -> anyhow::Result<()> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt as _;
         const DETACHED_PROCESS: u32 = 0x0000_0008;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW);
@@ -470,7 +472,11 @@ mod tests {
     #[test]
     fn cli_block_until_closed_releases_on_signal() {
         use std::io::Write as _;
-        use std::time::{Duration, Instant};
+        // std::time::Instant is disallowed (no wasm support); instant::Instant is
+        // a drop-in that re-exports the std type on native targets.
+        use std::time::Duration;
+
+        use instant::Instant;
 
         let addr = cli::fresh_addr();
         let listener = cli::bind(&addr).unwrap();
@@ -497,7 +503,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn cli_block_until_closed_times_out() {
-        use std::time::{Duration, Instant};
+        // std::time::Instant is disallowed (no wasm support); instant::Instant is
+        // a drop-in that re-exports the std type on native targets.
+        use std::time::Duration;
+
+        use instant::Instant;
 
         let addr = cli::fresh_addr();
         let listener = cli::bind(&addr).unwrap();
