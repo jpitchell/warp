@@ -19,11 +19,10 @@ use std::thread::JoinHandle;
 use warpui::{App, WindowId};
 
 use super::view_getters::pane_group_view;
-use crate::edit_wait::{build_wait_url, cli, WaitAddr};
-use crate::pane_group::PaneGroup;
-
 /// Status byte the app writes back when the watched tab closes normally.
 pub use crate::edit_wait::registry::STATUS_CLOSED_OK;
+use crate::edit_wait::{build_wait_url, cli, WaitAddr};
+use crate::pane_group::PaneGroup;
 
 /// A bound back-channel listener standing in for a blocked `warp --wait`
 /// process. Binds a real local socket at a trusted [`cli::fresh_addr`] and

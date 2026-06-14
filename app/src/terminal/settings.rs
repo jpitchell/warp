@@ -167,7 +167,9 @@ pub enum CmdArrowLineNav {
     /// terminal is in the alternate screen (full-screen TUI); Ctrl-A / Ctrl-E
     /// otherwise.
     #[default]
-    #[schemars(description = "Smart: Home/End for full-screen TUIs & CLI agents, Ctrl-A/Ctrl-E for shells.")]
+    #[schemars(
+        description = "Smart: Home/End for full-screen TUIs & CLI agents, Ctrl-A/Ctrl-E for shells."
+    )]
     Auto,
     /// Always send Ctrl-A / Ctrl-E (the historical behavior).
     #[schemars(description = "Always send Ctrl-A / Ctrl-E line-editing control characters.")]

@@ -34,10 +34,7 @@ fn restore_env_var(name: &str, previous: Option<OsString>) {
 #[test]
 fn parses_wait_flag_with_path() {
     let args = Args::try_parse_from(["warp", "--wait", "/tmp/foo.txt"]).unwrap();
-    assert_eq!(
-        args.wait_path(),
-        Some(std::path::Path::new("/tmp/foo.txt"))
-    );
+    assert_eq!(args.wait_path(), Some(std::path::Path::new("/tmp/foo.txt")));
 }
 
 #[test]

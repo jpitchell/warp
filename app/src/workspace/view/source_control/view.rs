@@ -16,17 +16,6 @@ use warpui::{
     AppContext, BlurContext, Entity, ModelHandle, SingletonEntity, TypedActionView, View,
     ViewContext,
 };
-
-use super::commit_box::CommitBoxState;
-use super::dialogs::{ActiveDialog, DialogState};
-use super::header::HeaderState;
-use super::item::{ItemState, Section, SourceControlListItem};
-use crate::appearance::Appearance;
-use crate::code::buffer_location::LocalOrRemotePath;
-use crate::source_control::{FileChange, SourceControlModel};
-use crate::view_components::DismissibleToast;
-use crate::workspace::ToastStack;
-
 #[cfg(feature = "local_fs")]
 use {
     super::item::{
@@ -56,6 +45,16 @@ use {
     warpui::keymap::macros::*,
     warpui::keymap::FixedBinding,
 };
+
+use super::commit_box::CommitBoxState;
+use super::dialogs::{ActiveDialog, DialogState};
+use super::header::HeaderState;
+use super::item::{ItemState, Section, SourceControlListItem};
+use crate::appearance::Appearance;
+use crate::code::buffer_location::LocalOrRemotePath;
+use crate::source_control::{FileChange, SourceControlModel};
+use crate::view_components::DismissibleToast;
+use crate::workspace::ToastStack;
 
 /// Actions handled by the source control view.
 #[derive(Clone, Debug, PartialEq)]

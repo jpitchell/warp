@@ -8,6 +8,8 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
+#[cfg(feature = "local_fs")]
+use warp_util::git::{run_git_command, run_git_command_with_env};
 
 use super::status::{
     parse_commit_log, parse_stash_list, parse_worktree_list, CommitEntry, StashEntry,
@@ -15,8 +17,6 @@ use super::status::{
 };
 #[cfg(feature = "local_fs")]
 use crate::util::git::compute_unpushed_state;
-#[cfg(feature = "local_fs")]
-use warp_util::git::{run_git_command, run_git_command_with_env};
 
 #[cfg(all(test, feature = "local_fs"))]
 #[path = "git_ops_tests.rs"]
