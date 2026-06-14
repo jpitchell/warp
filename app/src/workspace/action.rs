@@ -225,6 +225,17 @@ pub enum WorkspaceAction {
     CloseTabsOutsideGroup(TabGroupId),
     CloseTabsAboveGroup(TabGroupId),
     CloseTabsBelowGroup(TabGroupId),
+    /// Pins the tab at the given index. If the tab is part of a group, it
+    /// is first extracted from the group and then pinned as ungrouped.
+    PinTab(usize),
+    /// Unpins the tab at the given index.
+    UnpinTab(usize),
+    /// Pins the entire tab group: sets the group as pinned
+    /// and moves the group block to the end of the pinned region.
+    PinTabGroup(TabGroupId),
+    /// Unpins the entire tab group: clears the pinned flag on the group
+    /// and moves the group block to the start of the unpinned region.
+    UnpinTabGroup(TabGroupId),
     AddDefaultTab,
     AddTerminalTab {
         hide_homepage: bool,
@@ -873,6 +884,10 @@ impl WorkspaceAction {
             | CloseTabsOutsideGroup(_)
             | CloseTabsAboveGroup(_)
             | CloseTabsBelowGroup(_)
+            | PinTab(_)
+            | UnpinTab(_)
+            | PinTabGroup(_)
+            | UnpinTabGroup(_)
             | ToggleTabColor { .. }
             | AddDefaultTab
             | AddTerminalTab { .. }

@@ -100,9 +100,7 @@ use crate::code_review::diff_state::{
 use crate::code_review::editor_state::CodeReviewEditorState;
 use crate::code_review::find_model::CodeReviewFindModel;
 #[cfg(feature = "local_fs")]
-use crate::code_review::git_status_update::{
-    GitRepoStatusEvent, GitRepoStatusModel, GitStatusUpdateModel,
-};
+use crate::code_review::git_repo_model::{GitRepoModels, GitRepoStatusEvent, GitRepoStatusModel};
 #[cfg(feature = "local_fs")]
 use crate::code_review::github_repo_model::{GitHubRepoEvent, GitHubRepoModel};
 use crate::code_review::hidden_lines::calculate_hidden_lines;
@@ -588,6 +586,28 @@ struct RelocateCommentsResult {
     fallback_count: usize,
 }
 
+/// Resolves which terminal code review actions should target.
+///
+/// Injected by the hosting view (`RightPanelView`) so target selection is
+/// late-bound: actions land in the conversation the user is currently focused
+/// on rather than a terminal handle captured when the view was constructed.
+pub trait ReviewActionTargetProvider {
+    /// The terminal that should receive attach-as-context payloads. Uses the
+    /// same selection as review comment submission (focused > repo-preferred >
+    /// any available), falling back to the focused terminal inside `repo_path`
+    /// when none are available so per-action handling for busy terminals still
+    /// targets the focused conversation.
+    fn attach_terminal(
+        &self,
+        repo_path: &LocalOrRemotePath,
+        app: &AppContext,
+    ) -> Option<ViewHandle<TerminalView>>;
+
+    /// The focused (or active) terminal of the hosting pane group, regardless
+    /// of repo. Used for environment checks and terminal-targeted actions.
+    fn focused_terminal(&self, app: &AppContext) -> Option<ViewHandle<TerminalView>>;
+}
+
 /// State shared among the entire code review view.
 pub struct CodeReviewView {
     active_repo: Option<RepositoryState>,
@@ -645,7 +665,7 @@ pub struct CodeReviewView {
     diff_state_model: ModelHandle<DiffStateModel>,
     diff_selector: ViewHandle<DiffSelector>,
     header: CodeReviewHeader,
-    terminal_view: Option<WeakViewHandle<TerminalView>>,
+    action_target_provider: Option<Box<dyn ReviewActionTargetProvider>>,
     position_id_prefix: String,
     /// Whether the view is currently open (subscribed to diff state model).
     is_open: bool,
@@ -691,9 +711,7 @@ impl CodeReviewView {
     /// RPCs so the request rides the connection that's actually showing the
     /// review; `None` falls back to any connected session for the host.
     fn preferred_review_session(&self, ctx: &ViewContext<Self>) -> Option<SessionId> {
-        self.terminal_view
-            .as_ref()
-            .and_then(|tv| tv.upgrade(ctx))
+        self.focused_terminal(ctx)
             .and_then(|tv| tv.as_ref(ctx).active_block_session_id())
     }
 
@@ -1121,7 +1139,7 @@ impl CodeReviewView {
         repo_path: Option<LocalOrRemotePath>,
         diff_state_model: ModelHandle<DiffStateModel>,
         comment_batch_model: Option<ModelHandle<ReviewCommentBatch>>,
-        terminal_view: Option<WeakViewHandle<TerminalView>>,
+        action_target_provider: Option<Box<dyn ReviewActionTargetProvider>>,
         ctx: &mut ViewContext<Self>,
     ) -> Self {
         // TODO(asweet): Migrate subscription and event handling of diff_state_model to RepositoryState
@@ -1339,7 +1357,7 @@ impl CodeReviewView {
             position_id_prefix: random_str,
             viewported_list_state: list_state,
             scroll_state: ScrollStateHandle::default(),
-            terminal_view,
+            action_target_provider,
             window_id: ctx.window_id(),
             undo_action_button,
             last_revert: None,
@@ -1382,10 +1400,6 @@ impl CodeReviewView {
         }
 
         view
-    }
-
-    pub fn set_terminal_view(&mut self, terminal_view: WeakViewHandle<TerminalView>) {
-        self.terminal_view = Some(terminal_view);
     }
 
     pub fn set_review_destination(
@@ -2900,9 +2914,19 @@ impl CodeReviewView {
         )
     }
 
-    /// Get the terminal view for the current repo. Returns None if no repo or no terminal.
-    pub fn terminal_view(&self, app: &AppContext) -> Option<ViewHandle<TerminalView>> {
-        self.terminal_view.as_ref().and_then(|tv| tv.upgrade(app))
+    /// The terminal that attach-as-context actions should target, resolved at
+    /// action time for the current repo. Returns None if no repo, no provider,
+    /// or no suitable terminal.
+    fn attach_target_terminal(&self, app: &AppContext) -> Option<ViewHandle<TerminalView>> {
+        let repo_path = self.repo_path()?;
+        self.action_target_provider
+            .as_ref()?
+            .attach_terminal(repo_path, app)
+    }
+
+    /// The focused terminal of the hosting pane group, if any.
+    fn focused_terminal(&self, app: &AppContext) -> Option<ViewHandle<TerminalView>> {
+        self.action_target_provider.as_ref()?.focused_terminal(app)
     }
 
     fn diff_state(&self, app: &AppContext) -> DiffState {
@@ -2925,7 +2949,7 @@ impl CodeReviewView {
 
     #[cfg(not(target_family = "wasm"))]
     fn session_env(&self, app: &AppContext) -> Option<GitSessionState> {
-        let terminal_view = self.terminal_view.as_ref()?.upgrade(app)?;
+        let terminal_view = self.focused_terminal(app)?;
         terminal_view.read(app, |terminal, ctx| {
             let session = terminal
                 .active_block_session_id()
@@ -3114,7 +3138,7 @@ impl CodeReviewView {
                 )
                 .with_selection_as_context(Box::new(move |_, app| {
                     self_handle.upgrade(app).and_then(|code_review_view| {
-                        code_review_view.as_ref(app).terminal_view(app)
+                        code_review_view.as_ref(app).attach_target_terminal(app)
                     })
                 }));
 
@@ -3207,7 +3231,7 @@ impl CodeReviewView {
                     local_code_view =
                         local_code_view.with_selection_as_context(Box::new(move |_, app| {
                             self_handle.upgrade(app).and_then(|code_review_view| {
-                                code_review_view.as_ref(app).terminal_view(app)
+                                code_review_view.as_ref(app).attach_target_terminal(app)
                             })
                         }));
                 }
@@ -4157,7 +4181,7 @@ impl CodeReviewView {
             .map(|path| {
                 let has_steps = InitProjectModel::should_have_available_steps(path, app);
                 let is_terminal_in_correct_dir = self
-                    .terminal_view(app)
+                    .focused_terminal(app)
                     .and_then(|view| {
                         view.read(app, |t, _| t.pwd().map(|pwd| pwd == path.to_string_lossy()))
                     })
@@ -5746,7 +5770,7 @@ impl CodeReviewView {
         selected_text: String,
         ctx: &mut ViewContext<Self>,
     ) {
-        if let Some(terminal_view) = self.terminal_view.as_ref().and_then(|tv| tv.upgrade(ctx)) {
+        if let Some(terminal_view) = self.attach_target_terminal(ctx) {
             // If a CLI agent is active, send appropriate content to the PTY.
             let prompt = if start_line == end_line {
                 // Single-line: send the literal text with file/line context.
@@ -5836,11 +5860,7 @@ impl CodeReviewView {
     /// Insert diff set as context in the terminal input (either all files or a specific file)
     #[cfg(feature = "local_fs")]
     fn insert_diff_as_context(&mut self, scope: DiffSetScope, ctx: &mut ViewContext<Self>) {
-        if let Some(terminal_view) = self
-            .terminal_view
-            .as_ref()
-            .and_then(|view| view.upgrade(ctx))
-        {
+        if let Some(terminal_view) = self.attach_target_terminal(ctx) {
             let active_cli_agent = terminal_view.read(ctx, |tv, ctx| tv.active_cli_agent(ctx));
 
             let diff_set_scope = match &scope {
@@ -6052,7 +6072,7 @@ impl CodeReviewView {
             return;
         };
         // Try to get the terminal view and insert the context
-        if let Some(terminal_view) = self.terminal_view.as_ref().and_then(|tv| tv.upgrade(ctx)) {
+        if let Some(terminal_view) = self.attach_target_terminal(ctx) {
             let is_long_running =
                 terminal_view.read(ctx, |terminal_view, _| terminal_view.is_long_running());
             let active_cli_agent = terminal_view.read(ctx, |tv, ctx| tv.active_cli_agent(ctx));
@@ -6378,7 +6398,7 @@ impl CodeReviewView {
         cfg_if::cfg_if! {
             if #[cfg(feature = "local_fs")] {
                 let github_repo_model = self.github_repo_model.as_ref()?;
-                github_repo_model.as_ref(ctx).pr_info().cloned()
+                github_repo_model.as_ref(ctx).pr_info(ctx).cloned()
             } else {
                 None
             }
@@ -6391,7 +6411,7 @@ impl CodeReviewView {
         {
             self.github_repo_model
                 .as_ref()
-                .map(|h| h.as_ref(ctx).is_refreshing_pr_info())
+                .map(|h| h.as_ref(ctx).is_refreshing_pr_info(ctx))
                 .unwrap_or(false)
         }
 
@@ -6425,8 +6445,8 @@ impl CodeReviewView {
         else {
             return;
         };
-        let result = GitStatusUpdateModel::handle(ctx)
-            .update(ctx, |model, ctx| model.subscribe(&repo_path, ctx));
+        let result =
+            GitRepoModels::handle(ctx).update(ctx, |model, ctx| model.subscribe(&repo_path, ctx));
         let handle = match result {
             Ok(handle) => handle,
             Err(err) => {
@@ -6453,7 +6473,7 @@ impl CodeReviewView {
             return;
         };
 
-        let result = GitStatusUpdateModel::handle(ctx).update(ctx, |model, ctx| {
+        let result = GitRepoModels::handle(ctx).update(ctx, |model, ctx| {
             model.subscribe_github_repo(&repo_path, ctx)
         });
         let handle = match result {
@@ -7530,14 +7550,14 @@ impl TypedActionView for CodeReviewView {
                 ctx.focus_self();
             }
             CodeReviewAction::OpenRepository => {
-                if let Some(terminal_view) = self.terminal_view(ctx) {
+                if let Some(terminal_view) = self.focused_terminal(ctx) {
                     terminal_view.update(ctx, |terminal, ctx| {
                         terminal.handle_action(&TerminalAction::PickRepoToOpen, ctx);
                     });
                 }
             }
             CodeReviewAction::InitProjectForCurrentDirectory => {
-                if let Some(terminal_view) = self.terminal_view(ctx) {
+                if let Some(terminal_view) = self.focused_terminal(ctx) {
                     terminal_view.update(ctx, |terminal, ctx| {
                         terminal.handle_action(&TerminalAction::InitProject, ctx);
                     });
