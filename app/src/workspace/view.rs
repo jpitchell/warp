@@ -20403,7 +20403,14 @@ impl Workspace {
             .platform_window(self.window_id)
             .map(|window| window.fullscreen_state() == FullscreenState::Fullscreen)
             .unwrap_or(false);
-        if self.is_left_panel_open(ctx) {
+        let vertical_tabs_active =
+            FeatureFlag::VerticalTabs.is_enabled() && *TabSettings::as_ref(ctx).use_vertical_tabs;
+        // When an open left panel sits in the top-left corner it reserves space
+        // for the traffic lights itself, so the tab bar must not also pad. In
+        // vertical-tabs mode, however, the config-driven panels render *below*
+        // the top bar (see `render_panels`), so nothing covers the lights up
+        // there and the top bar must keep reserving the space itself.
+        if self.is_left_panel_open(ctx) && !vertical_tabs_active {
             0.
         } else if is_window_fullscreen && cfg!(target_os = "macos") {
             // Full-screen mode on MacOS does not need as much padding (traffic lights are hidden).
