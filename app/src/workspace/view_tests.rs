@@ -345,6 +345,40 @@ fn test_theme_chooser_does_not_suppress_tab_bar_traffic_light_padding() {
         });
     });
 }
+
+#[test]
+fn test_vertical_tabs_top_bar_reserves_traffic_light_padding_with_left_panel_open() {
+    // Regression: in vertical-tabs mode the config-driven panels render *below*
+    // the top bar (see `render_panels`), so an open left panel never covers the
+    // window's traffic lights. The top bar must keep reserving space for them;
+    // otherwise the header-toolbar chips overlap the traffic lights.
+    let _vertical_tabs_guard = FeatureFlag::VerticalTabs.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings.use_vertical_tabs.set_value(true, ctx));
+            });
+
+            let closed_padding = workspace.compute_tab_bar_left_padding(ctx);
+            assert!(
+                closed_padding > 0.,
+                "Top bar should reserve left padding in vertical-tabs mode"
+            );
+
+            workspace.open_left_panel(ctx);
+            assert_eq!(
+                workspace.compute_tab_bar_left_padding(ctx),
+                closed_padding,
+                "Vertical-tabs top bar must keep reserving traffic-light space \
+                 even when the left panel is open"
+            );
+        });
+    });
+}
 #[cfg(feature = "local_fs")]
 fn open_worktree_sidecar(workspace: &ViewHandle<Workspace>, app: &mut App) {
     workspace.update(app, |workspace, ctx| {
