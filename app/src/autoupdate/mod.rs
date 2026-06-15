@@ -1151,7 +1151,9 @@ fn release_assets_directory_url(channel: Channel, version: &str) -> String {
         Channel::Preview => {
             format!("{releases_base_url}/preview/{version}")
         }
-        Channel::Dev => format!("{releases_base_url}/dev/{version}"),
+        // This fork serves dev artifacts from GitHub Releases, where assets live at
+        // `<releases_base_url>/download/<tag>/<file>` with the release tag set to the version.
+        Channel::Dev => format!("{releases_base_url}/download/{version}"),
         Channel::Local | Channel::Integration | Channel::Oss => {
             unreachable!("local/integration/oss autoupdate not supported");
         }
