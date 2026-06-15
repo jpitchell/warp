@@ -84,6 +84,7 @@ use crate::terminal::cli_agent_sessions::plugin_manager::{
 use crate::terminal::cli_agent_sessions::{
     CLIAgentInputState, CLIAgentSessionsModel, CLIAgentSessionsModelEvent,
 };
+use crate::terminal::general_settings::GeneralSettings;
 use crate::terminal::input::models::InlineModelSelectorTab;
 use crate::terminal::input::{HandoffComposeState, MenuPositioningProvider};
 #[cfg(not(target_family = "wasm"))]
@@ -101,7 +102,7 @@ use crate::terminal::view::init::OPEN_CLI_AGENT_RICH_INPUT_KEYBINDING;
 use crate::terminal::view::TerminalAction;
 #[cfg(not(target_family = "wasm"))]
 use crate::terminal::ShellLaunchData;
-use crate::terminal::{CLIAgent, TerminalModel};
+use crate::terminal::{claude_hook, CLIAgent, TerminalModel};
 use crate::ui_components::icons::Icon;
 use crate::view_components::action_button::{
     ActionButton, ActionButtonTheme, AdjoinedSide, ButtonSize, KeystrokeSource, NakedTheme,
@@ -228,6 +229,16 @@ pub struct AgentInputFooter {
     update_plugin_button: ViewHandle<ActionButton>,
     update_instructions_button: ViewHandle<ActionButton>,
     dismiss_plugin_chip_button: ViewHandle<ActionButton>,
+    /// "Sync directory" chip: installs the Claude Code cwd hook so Warp's
+    /// cwd/git-branch cards follow Claude mid-session. Claude sessions only.
+    install_hook_button: ViewHandle<ActionButton>,
+    dismiss_hook_chip_button: ViewHandle<ActionButton>,
+    /// Cached result of [`claude_hook::is_hook_installed`], so the install chip's
+    /// gating doesn't hit the disk on every render. Computed lazily, invalidated
+    /// after we install the hook ourselves. (Only read off-wasm, where the chip
+    /// can actually show.)
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
+    claude_hook_installed: std::cell::Cell<Option<bool>>,
     plugin_operation_in_progress: bool,
     /// When `true`, the install chip is allowed to render.
     /// Starts `false` and is set to `true` after a debounce timer fires,
@@ -486,6 +497,32 @@ impl AgentInputFooter {
                 .with_adjoined_side(AdjoinedSide::Left)
                 .on_click(|ctx| {
                     ctx.dispatch_typed_action(AgentInputFooterAction::DismissPluginChip);
+                })
+        });
+
+        let install_hook_button = ctx.add_typed_action_view(|_ctx| {
+            ActionButton::new("Sync directory", InstallPluginButtonTheme)
+                .with_icon(Icon::Folder)
+                .with_tooltip(
+                    "Install a Claude Code hook so Warp's directory & branch cards follow Claude",
+                )
+                .with_size(cli_button_size)
+                .with_tooltip_alignment(TooltipAlignment::Left)
+                .with_adjoined_side(AdjoinedSide::Right)
+                .on_click(|ctx| {
+                    ctx.dispatch_typed_action(AgentInputFooterAction::InstallClaudeCwdHook);
+                })
+        });
+
+        let dismiss_hook_chip_button = ctx.add_typed_action_view(|_ctx| {
+            ActionButton::new("", InstallPluginButtonTheme)
+                .with_icon(Icon::X)
+                .with_size(cli_button_size)
+                .with_tooltip("Dismiss")
+                .with_tooltip_alignment(TooltipAlignment::Left)
+                .with_adjoined_side(AdjoinedSide::Left)
+                .on_click(|ctx| {
+                    ctx.dispatch_typed_action(AgentInputFooterAction::DismissClaudeCwdHookChip);
                 })
         });
 
@@ -846,6 +883,9 @@ impl AgentInputFooter {
             update_plugin_button,
             update_instructions_button,
             dismiss_plugin_chip_button,
+            install_hook_button,
+            dismiss_hook_chip_button,
+            claude_hook_installed: std::cell::Cell::new(None),
             plugin_operation_in_progress: false,
             plugin_chip_ready: false,
             context_window_button,
@@ -1487,6 +1527,42 @@ impl AgentInputFooter {
         }
     }
 
+    /// Whether to show the "Sync directory" chip offering to install the Claude
+    /// Code cwd hook. Only for Claude sessions, when the hook isn't installed and
+    /// the prompt hasn't been dismissed.
+    ///
+    /// Never shown on wasm: the hook installs into the local `~/.claude/` and there
+    /// is no local filesystem (or local Claude Code process) on the web build, so
+    /// the chip would be non-functional.
+    fn should_show_claude_hook_chip(&self, app: &AppContext) -> bool {
+        #[cfg(target_family = "wasm")]
+        {
+            let _ = app;
+            false
+        }
+        #[cfg(not(target_family = "wasm"))]
+        {
+            matches!(self.cli_agent(app), Some(CLIAgent::Claude))
+                && !*GeneralSettings::as_ref(app)
+                    .claude_cwd_hook_prompt_dismissed
+                    .value()
+                && !self.claude_hook_is_installed()
+        }
+    }
+
+    /// Memoized [`claude_hook::is_hook_installed`]. The underlying check does
+    /// synchronous disk reads + JSON parsing, so we cache the result and only
+    /// recompute after invalidating it (e.g. once we install the hook ourselves).
+    #[cfg(not(target_family = "wasm"))]
+    fn claude_hook_is_installed(&self) -> bool {
+        if let Some(installed) = self.claude_hook_installed.get() {
+            return installed;
+        }
+        let installed = claude_hook::is_hook_installed();
+        self.claude_hook_installed.set(Some(installed));
+        installed
+    }
+
     fn render_cli_mode_footer(&self, app: &AppContext) -> Box<dyn Element> {
         let appearance = Appearance::as_ref(app);
         let cli_icon_size = ButtonSize::AgentInputButton.icon_size(appearance, app);
@@ -1570,6 +1646,15 @@ impl AgentInputFooter {
                 .with_cross_axis_alignment(CrossAxisAlignment::Center)
                 .with_child(chip)
                 .with_child(ChildView::new(&self.dismiss_plugin_chip_button).finish())
+                .finish();
+            left_buttons.add_child(chip_with_dismiss);
+        }
+
+        if self.should_show_claude_hook_chip(app) {
+            let chip_with_dismiss = Flex::row()
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_child(ChildView::new(&self.install_hook_button).finish())
+                .with_child(ChildView::new(&self.dismiss_hook_chip_button).finish())
                 .finish();
             left_buttons.add_child(chip_with_dismiss);
         }
@@ -2400,6 +2485,10 @@ pub enum AgentInputFooterAction {
     OpenPluginInstallInstructionsPane,
     OpenPluginUpdateInstructionsPane,
     DismissPluginChip,
+    /// Install the Claude Code cwd-sync hook (from the "Sync directory" chip).
+    InstallClaudeCwdHook,
+    /// Dismiss the "Sync directory" chip so it is not shown again.
+    DismissClaudeCwdHookChip,
     StartRemoteControl,
     StopRemoteControl,
     OpenCodingAgentSettings,
@@ -2602,6 +2691,22 @@ impl TypedActionView for AgentInputFooter {
                     page: SettingsSection::ThirdPartyCLIAgents,
                     widget_id: crate::settings_view::cli_agent_settings_widget_id(),
                 });
+            }
+            AgentInputFooterAction::InstallClaudeCwdHook => {
+                if let Err(e) = claude_hook::install_hook() {
+                    log::error!("Failed to install Claude Code cwd hook: {e:#}");
+                }
+                // Force the gating check to re-read install state on next render.
+                self.claude_hook_installed.set(None);
+                ctx.notify();
+            }
+            AgentInputFooterAction::DismissClaudeCwdHookChip => {
+                GeneralSettings::handle(ctx).update(ctx, |settings, ctx| {
+                    let _ = settings
+                        .claude_cwd_hook_prompt_dismissed
+                        .set_value(true, ctx);
+                });
+                ctx.notify();
             }
             AgentInputFooterAction::HandoffChipClicked => {
                 if FeatureFlag::OzHandoff.is_enabled()
