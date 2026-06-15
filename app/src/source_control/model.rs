@@ -81,6 +81,11 @@ pub enum SourceControlEvent {
     /// view surfaces this so the Refresh spinner doesn't quietly clear with no
     /// explanation.
     RefreshFailed(String),
+    /// Emitted after the dirty-state check that precedes removing a worktree.
+    /// `dirty` is true when the worktree has modified/untracked files, in which
+    /// case removal needs `--force`. The view opens the confirm dialog with
+    /// wording and a button that match this state.
+    WorktreeRemovePrepared { path: PathBuf, dirty: bool },
 }
 
 // ── SourceControlCacheModel (singleton) ──────────────────────────────────────
@@ -635,6 +640,26 @@ impl SourceControlModel {
             GitOpKind::WorktreeAdd,
             async move { git_ops::worktree_add(&repo, &path, branch).await },
             ctx,
+        );
+    }
+
+    /// Checks whether the worktree at `path` is dirty, then emits
+    /// [`SourceControlEvent::WorktreeRemovePrepared`] so the view can open the
+    /// confirm dialog. The check is read-only, so it deliberately does not go
+    /// through `run_op` (no spinner / "operation in progress" gating). If the
+    /// check itself fails we fall back to `dirty = false`; the actual remove
+    /// will surface any real error.
+    pub fn prepare_worktree_remove(&mut self, path: PathBuf, ctx: &mut ModelContext<Self>) {
+        let worktree_path = path.clone();
+        ctx.spawn(
+            async move { git_ops::worktree_is_dirty(&worktree_path).await },
+            move |_me, result, ctx| {
+                let dirty = result.unwrap_or_else(|err| {
+                    log::warn!("worktree dirty-check failed, assuming clean: {err}");
+                    false
+                });
+                ctx.emit(SourceControlEvent::WorktreeRemovePrepared { path, dirty });
+            },
         );
     }
 

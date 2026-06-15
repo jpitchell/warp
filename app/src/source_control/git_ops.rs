@@ -435,6 +435,15 @@ pub async fn worktree_remove(repo_path: &Path, path: &Path, force: bool) -> Resu
     run_git_command(repo_path, &args).await.map(|_| ())
 }
 
+/// Returns whether the worktree at `worktree_path` has modified, staged, or
+/// untracked files (a non-empty `git status --porcelain`). Used to decide up
+/// front whether removing the worktree will need `--force`.
+#[cfg(feature = "local_fs")]
+pub async fn worktree_is_dirty(worktree_path: &Path) -> Result<bool> {
+    let output = run_git_command(worktree_path, &["status", "--porcelain"]).await?;
+    Ok(!output.trim().is_empty())
+}
+
 // ── History ──────────────────────────────────────────────────────────────────
 
 /// Returns the most recent `limit` commits, with `is_unpushed` set for commits
@@ -576,6 +585,11 @@ pub async fn worktree_add(_repo_path: &Path, _path: &Path, _branch: WorktreeBran
 
 #[cfg(not(feature = "local_fs"))]
 pub async fn worktree_remove(_repo_path: &Path, _path: &Path, _force: bool) -> Result<()> {
+    unsupported!()
+}
+
+#[cfg(not(feature = "local_fs"))]
+pub async fn worktree_is_dirty(_worktree_path: &Path) -> Result<bool> {
     unsupported!()
 }
 
