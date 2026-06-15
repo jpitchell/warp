@@ -14,6 +14,7 @@ mod dcs_hooks;
 mod handler;
 
 use std::fmt::Write;
+use std::sync::Arc;
 use std::time::Duration;
 use std::{io, str};
 
@@ -165,6 +166,28 @@ fn parse_osc_7_cwd(payload: &[u8]) -> Option<String> {
     }
 
     percent_decode_utf8(encoded_path)
+}
+
+/// Validate and extract the URI from an OSC 8 hyperlink payload (the portion after
+/// `OSC 8 ; params ;`). Returns `None` for an empty URI (which closes the current hyperlink) or a
+/// URI whose scheme isn't allow-listed.
+///
+/// Only `http`, `https`, `file`, and `mailto` are permitted. Because the hyperlink target is
+/// terminal-controlled, this blocks abuse vectors a hostile program could otherwise smuggle into
+/// clickable text (e.g. `javascript:` or `data:` URIs).
+fn parse_osc_8_uri(payload: &[u8]) -> Option<Arc<str>> {
+    const ALLOWED_SCHEMES: &[&str] = &["http", "https", "file", "mailto"];
+
+    let uri = str::from_utf8(payload).ok()?.trim();
+    if uri.is_empty() {
+        return None;
+    }
+    let scheme = uri.split_once(':').map(|(scheme, _)| scheme)?;
+    if !ALLOWED_SCHEMES.contains(&scheme.to_ascii_lowercase().as_str()) {
+        debug!("Ignoring OSC 8 hyperlink with disallowed scheme {scheme:?}");
+        return None;
+    }
+    Some(Arc::from(uri))
 }
 
 fn osc_7_host_is_local(host: &str) -> bool {
@@ -836,6 +859,26 @@ where
                     }
                 }
                 unhandled(params);
+            }
+
+            // OSC 8: Hyperlink.
+            // Format: OSC 8 ; params ; URI ST
+            // `params` (optional `key=value` pairs, e.g. `id=...`) are ignored. An empty URI
+            // closes the current hyperlink; otherwise it is applied to subsequently printed cells
+            // until changed or closed (tracked on the cursor template like an SGR attribute).
+            // Reference: https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda
+            b"8" => {
+                // The URI is everything after the second `;`. Rejoin params[2..] (matching the
+                // OSC 7 handler) so a URI containing semicolons isn't silently truncated, then
+                // validate the scheme before applying. Fewer than 3 params, or an empty/invalid
+                // URI, closes any open hyperlink.
+                let uri = if params.len() >= 3 {
+                    let payload: Vec<u8> = params[2..].join(&b';');
+                    parse_osc_8_uri(&payload)
+                } else {
+                    None
+                };
+                self.handler.set_hyperlink(uri);
             }
 
             // Set color index.

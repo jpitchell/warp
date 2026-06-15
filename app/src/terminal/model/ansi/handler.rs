@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io;
+use std::sync::Arc;
 
 use warp_terminal::model::ansi::control_sequence_parameters::*;
 use warp_terminal::model::{KeyboardModes, KeyboardModesApplyBehavior};
@@ -161,6 +162,12 @@ pub trait Handler {
 
     /// Set a terminal attribute.
     fn terminal_attribute(&mut self, _attr: Attr);
+
+    /// Set (or clear, with `None`) the current OSC 8 hyperlink. Like an SGR attribute, it applies
+    /// to every cell printed until changed. Defaults to a no-op so handlers without a cell grid
+    /// (e.g. early-output) need not implement it; grid-backed handlers override it to update the
+    /// cursor template.
+    fn set_hyperlink(&mut self, _uri: Option<Arc<str>>) {}
 
     /// Set mode.
     fn set_mode(&mut self, _mode: Mode);

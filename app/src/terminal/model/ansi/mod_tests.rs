@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use hex;
 use warp_core::command::ExitCode;
@@ -25,6 +26,7 @@ struct MockHandler {
     d_proto_hooks: Vec<DProtoHook>,
     pluggable_notifications: Vec<(Option<String>, String)>,
     cwd_updates: Vec<String>,
+    hyperlinks: Vec<Option<Arc<str>>>,
     registered_session_ids: HashSet<SessionId>,
     should_validate_dcs_hook_session_id: bool,
 }
@@ -39,6 +41,10 @@ impl Handler for MockHandler {
     }
     fn terminal_attribute(&mut self, attr: Attr) {
         self.attr = Some(attr);
+    }
+
+    fn set_hyperlink(&mut self, uri: Option<Arc<str>>) {
+        self.hyperlinks.push(uri);
     }
 
     fn configure_charset(&mut self, index: CharsetIndex, charset: StandardCharset) {
@@ -266,6 +272,7 @@ impl Default for MockHandler {
             d_proto_hooks: Vec::new(),
             pluggable_notifications: Vec::new(),
             cwd_updates: Vec::new(),
+            hyperlinks: Vec::new(),
             registered_session_ids: HashSet::new(),
             should_validate_dcs_hook_session_id: true,
         }
@@ -1005,6 +1012,51 @@ fn parse_osc7_local_hostname() {
     let (_, handler) = parse_bytes(payload.as_bytes());
 
     assert_eq!(handler.cwd_updates, vec!["/Users/foo/bar".to_string()]);
+}
+
+#[test]
+fn parse_osc8_hyperlink_set_and_close() {
+    // `OSC 8 ; ; URI ST` opens a hyperlink; `OSC 8 ; ; ST` closes it. The printed `X` in between
+    // is a no-op for MockHandler but mirrors how the link wraps visible text.
+    let (_, handler) = parse_bytes(b"\x1b]8;;https://anthropic.com\x1b\\X\x1b]8;;\x1b\\");
+    assert_eq!(
+        handler.hyperlinks,
+        vec![Some(Arc::from("https://anthropic.com")), None]
+    );
+}
+
+#[test]
+fn parse_osc8_hyperlink_ignores_params_and_accepts_bel_terminator() {
+    // The `params` field (`id=1`) is ignored, and BEL (`\x07`) is a valid terminator.
+    let (_, handler) = parse_bytes(b"\x1b]8;id=1;https://example.com\x07");
+    assert_eq!(
+        handler.hyperlinks,
+        vec![Some(Arc::from("https://example.com"))]
+    );
+}
+
+#[test]
+fn parse_osc8_hyperlink_rejects_disallowed_scheme() {
+    // A non-allowlisted scheme (`javascript:`) is dropped, recorded as a close (`None`).
+    let (_, handler) = parse_bytes(b"\x1b]8;;javascript:alert(1)\x1b\\");
+    assert_eq!(handler.hyperlinks, vec![None]);
+}
+
+#[test]
+fn parse_osc_8_uri_validates_scheme() {
+    assert_eq!(
+        parse_osc_8_uri(b"https://anthropic.com").as_deref(),
+        Some("https://anthropic.com")
+    );
+    assert_eq!(
+        parse_osc_8_uri(b"file:///tmp/x.png").as_deref(),
+        Some("file:///tmp/x.png")
+    );
+    // Empty URI closes the link, disallowed/scheme-less URIs are rejected -- all yield `None`.
+    assert!(parse_osc_8_uri(b"").is_none());
+    assert!(parse_osc_8_uri(b"javascript:alert(1)").is_none());
+    assert!(parse_osc_8_uri(b"data:text/html,x").is_none());
+    assert!(parse_osc_8_uri(b"notaurl").is_none());
 }
 
 #[test]

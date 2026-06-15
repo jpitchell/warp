@@ -351,7 +351,7 @@ fn is_local_marketplace_path(source: &str) -> bool {
 }
 
 /// Checks `CLAUDE_HOME` env var first, falls back to `~/.claude`.
-fn claude_home_dir() -> io::Result<PathBuf> {
+pub(crate) fn claude_home_dir() -> io::Result<PathBuf> {
     if let Ok(claude_home) = env::var("CLAUDE_HOME") {
         return Ok(PathBuf::from(claude_home));
     }

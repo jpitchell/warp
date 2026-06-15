@@ -869,6 +869,10 @@ impl ansi::Handler for BlockGrid {
         self.ansi_handler().terminal_attribute(attr);
     }
 
+    fn set_hyperlink(&mut self, uri: Option<std::sync::Arc<str>>) {
+        self.ansi_handler().set_hyperlink(uri);
+    }
+
     fn set_mode(&mut self, mode: Mode) {
         self.ansi_handler().set_mode(mode);
     }

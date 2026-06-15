@@ -1773,6 +1773,20 @@ impl TerminalModel {
             .to_owned()
     }
 
+    /// Resolve the target a `Url` highlighted link should open or copy. For an OSC 8 hyperlink the
+    /// explicit URI is authoritative (and may differ from the visible text); otherwise the target
+    /// is reconstructed from the cell text spanning the link's range.
+    pub fn url_link_target(
+        &self,
+        url: &WithinModel<Link>,
+        respect_obfuscated_secrets: RespectObfuscatedSecrets,
+    ) -> String {
+        if let Some(uri) = &url.get_inner().uri {
+            return uri.to_string();
+        }
+        self.link_at_range(url, respect_obfuscated_secrets)
+    }
+
     /// Return all possible file paths containing the grid point ordered from longest to shortest.
     pub fn possible_file_paths_at_point(
         &self,
@@ -1801,6 +1815,21 @@ impl TerminalModel {
             WithinModel::BlockList(inner_point) => self
                 .block_list
                 .url_at_point(inner_point)
+                .map(WithinModel::BlockList),
+        }
+    }
+
+    /// Locate a CLI-agent `[Image #N]` token at `point`, returning its cell range (path resolution
+    /// happens in the view layer, which has the agent session context).
+    pub fn image_tag_at_point(&self, point: &WithinModel<Point>) -> Option<WithinModel<Link>> {
+        match point {
+            WithinModel::AltScreen(inner_point) => self
+                .alt_screen
+                .image_tag_at_point(inner_point)
+                .map(WithinModel::AltScreen),
+            WithinModel::BlockList(inner_point) => self
+                .block_list
+                .image_tag_at_point(inner_point)
                 .map(WithinModel::BlockList),
         }
     }
@@ -2559,6 +2588,11 @@ impl ansi::Handler for TerminalModel {
     fn terminal_attribute(&mut self, attribute: ansi::Attr) {
         self.alt_screen.terminal_attribute(attribute);
         self.block_list.terminal_attribute(attribute);
+    }
+
+    fn set_hyperlink(&mut self, uri: Option<Arc<str>>) {
+        self.alt_screen.set_hyperlink(uri.clone());
+        self.block_list.set_hyperlink(uri);
     }
 
     fn set_mode(&mut self, mode: ansi::Mode) {

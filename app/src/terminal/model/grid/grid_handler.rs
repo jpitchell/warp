@@ -18,6 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::mem;
 use std::num::NonZeroUsize;
 use std::ops::{Range, RangeInclusive};
+use std::sync::Arc;
 
 use bounded_vec_deque::BoundedVecDeque;
 use filtering::FilterState;
@@ -165,6 +166,10 @@ pub struct PossiblePath {
 pub struct Link {
     pub range: RangeInclusive<Point>,
     pub is_empty: bool,
+    /// Explicit target for an OSC 8 hyperlink, whose URI may differ from the visible text in
+    /// `range`. `None` for regex-detected URLs, where the target is reconstructed from the cell
+    /// text spanning `range`.
+    pub uri: Option<Arc<str>>,
 }
 
 impl RangeInModel for Link {
@@ -645,6 +650,59 @@ impl GridHandler {
         RegexIter::new(start, end, direction, self, dfas)
     }
 
+    /// Detect a CLI-agent `[Image #N]` token containing `displayed_point`, returning its cell
+    /// range. The path is resolved by the view layer (which has the agent session context); this
+    /// only locates and validates the token. The token is pure ASCII, so cells map 1:1 to
+    /// characters and a simple bracket scan suffices.
+    pub fn image_tag_at_point(&self, displayed_point: Point) -> Option<Link> {
+        /// Upper bound on the token length we scan for, so a stray `[`/`]` elsewhere on the line
+        /// can't trigger an unbounded scan. `[Image #<digits>]` is short.
+        const MAX_TAG_LEN: usize = 32;
+        const TAG_PREFIX: &str = "Image #";
+
+        let original_point = self.maybe_translate_point_from_displayed_to_original(displayed_point);
+        let row = original_point.row;
+        let col = original_point.col;
+
+        let grid_line = self.row(row)?;
+        let line_length = grid_line.line_length();
+        if col >= line_length {
+            return None;
+        }
+
+        // Scan left to the opening `[`, then right to the closing `]`, both bounded.
+        let mut start = col;
+        while grid_line.get(start)?.c != '[' {
+            if start == 0 || col - start >= MAX_TAG_LEN {
+                return None;
+            }
+            start -= 1;
+        }
+        let mut end = col;
+        while grid_line.get(end)?.c != ']' {
+            if end + 1 >= line_length || end - col >= MAX_TAG_LEN {
+                return None;
+            }
+            end += 1;
+        }
+
+        // Validate the bracketed content is exactly `Image #<digits>`.
+        let inner: String = (start + 1..end)
+            .filter_map(|c| grid_line.get(c))
+            .map(|cell| cell.c)
+            .collect();
+        let number = inner.strip_prefix(TAG_PREFIX)?;
+        if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+
+        Some(Link {
+            range: RangeInclusive::new(Point { row, col: start }, Point { row, col: end }),
+            is_empty: false,
+            uri: None,
+        })
+    }
+
     pub fn url_at_point(&self, displayed_point: Point) -> Option<Link> {
         let original_point = self.maybe_translate_point_from_displayed_to_original(displayed_point);
         let row = original_point.row;
@@ -659,6 +717,40 @@ impl GridHandler {
         }
 
         let current_cell = grid_line.get(col)?;
+
+        // OSC 8 explicit hyperlink: if the hovered cell carries a hyperlink URI, link the
+        // contiguous run of cells on this row that share the same URI (all cells in one hyperlink
+        // share a single `Arc`, so identity is a cheap `Arc::ptr_eq`). This takes precedence over
+        // regex URL detection because the URI is authoritative and may differ from the visible
+        // text. Runs are row-bounded; a hyperlink wrapped across rows highlights per row.
+        if let Some(uri) = current_cell.hyperlink() {
+            let uri = uri.clone();
+            let shares_uri = |c: usize| {
+                grid_line
+                    .get(c)
+                    .and_then(|cell| cell.hyperlink())
+                    .is_some_and(|other| Arc::ptr_eq(other, &uri))
+            };
+            let mut start_col = col;
+            while start_col > 0 && shares_uri(start_col - 1) {
+                start_col -= 1;
+            }
+            let mut end_col = col;
+            while end_col + 1 < line_length && shares_uri(end_col + 1) {
+                end_col += 1;
+            }
+            return Some(Link {
+                range: RangeInclusive::new(
+                    Point {
+                        row,
+                        col: start_col,
+                    },
+                    Point { row, col: end_col },
+                ),
+                is_empty: false,
+                uri: Some(uri),
+            });
+        }
 
         // Function to check if cell is on url boundary (invalid url characters).
         let is_at_boundary = |cell: &Cell| {
@@ -707,6 +799,7 @@ impl GridHandler {
         let mut url = Link {
             range: RangeInclusive::new(Point::default(), Point::default()),
             is_empty: true,
+            uri: None,
         };
 
         // Whether we have scanned past the hovered point.
@@ -725,6 +818,7 @@ impl GridHandler {
                 url = Link {
                     range: RangeInclusive::new(Point::default(), Point::default()),
                     is_empty: true,
+                    uri: None,
                 };
                 break;
             }
@@ -741,6 +835,7 @@ impl GridHandler {
                     url = Link {
                         range: RangeInclusive::new(Point::default(), Point::default()),
                         is_empty: true,
+                        uri: None,
                     };
 
                     // Push schemes into URL.
