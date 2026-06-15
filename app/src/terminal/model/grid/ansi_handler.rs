@@ -922,6 +922,13 @@ impl ansi::Handler for GridHandler {
         }
     }
 
+    /// Set (or clear) the current OSC 8 hyperlink on the cursor template, so subsequently printed
+    /// cells carry it (mirrors how [`Self::terminal_attribute`] tracks SGR state on the template).
+    #[inline]
+    fn set_hyperlink(&mut self, uri: Option<Arc<str>>) {
+        self.grid.cursor.template.set_hyperlink(uri);
+    }
+
     /// Set a terminal attribute.
     #[inline]
     fn terminal_attribute(&mut self, attr: ansi::Attr) {
@@ -1586,6 +1593,9 @@ impl GridHandler {
         let fg = self.grid.cursor().template.fg;
         let bg = self.grid.cursor().template.bg;
         let flags = self.grid.cursor().template.flags;
+        // Carry the current OSC 8 hyperlink (set via `set_hyperlink`) onto the cell. `cloned()` is
+        // a cheap `None` for the common, non-hyperlinked case; only hyperlinked runs clone the Arc.
+        let hyperlink = self.grid.cursor().template.hyperlink().cloned();
 
         let cursor_cell = self.grid.cursor_cell();
 
@@ -1595,6 +1605,7 @@ impl GridHandler {
         cursor_cell.fg = fg;
         cursor_cell.bg = bg;
         cursor_cell.flags = flags;
+        cursor_cell.set_hyperlink(hyperlink);
 
         cursor_cell
     }

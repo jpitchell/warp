@@ -3145,6 +3145,10 @@ impl ansi::Handler for Block {
         delegate!(self.terminal_attribute(attribute));
     }
 
+    fn set_hyperlink(&mut self, uri: Option<Arc<str>>) {
+        delegate!(self.set_hyperlink(uri));
+    }
+
     fn set_mode(&mut self, mode: ansi::Mode) {
         delegate!(self.set_mode(mode));
     }

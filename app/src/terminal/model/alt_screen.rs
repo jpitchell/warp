@@ -287,6 +287,10 @@ impl AltScreen {
         self.grid_handler.url_at_point(*point)
     }
 
+    pub fn image_tag_at_point(&self, point: &Point) -> Option<Link> {
+        self.grid_handler.image_tag_at_point(*point)
+    }
+
     pub fn fragment_boundary_at_point(&self, point: &Point) -> FragmentBoundary {
         self.grid_handler.fragment_boundary_at_point(point)
     }
@@ -544,6 +548,10 @@ impl ansi::Handler for AltScreen {
 
     fn terminal_attribute(&mut self, attr: Attr) {
         self.ansi_handler().terminal_attribute(attr);
+    }
+
+    fn set_hyperlink(&mut self, uri: Option<Arc<str>>) {
+        self.ansi_handler().set_hyperlink(uri);
     }
 
     fn set_mode(&mut self, mode: Mode) {

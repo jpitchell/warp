@@ -1003,6 +1003,12 @@ impl ansi::Handler for HeaderGrid {
         }
     }
 
+    fn set_hyperlink(&mut self, uri: Option<std::sync::Arc<str>>) {
+        // `delegate!` may expand the argument at multiple grid targets, so pass `uri.clone()`:
+        // each expansion clones from the still-owned `uri` rather than moving it (it isn't `Copy`).
+        delegate!(self.set_hyperlink(uri.clone()));
+    }
+
     fn set_mode(&mut self, mode: ansi::Mode) {
         delegate!(self.set_mode(mode));
     }

@@ -2,6 +2,7 @@
 // Apache license; see: crates/warp_terminal/src/model/LICENSE-ALACRITTY.
 
 use std::boxed::Box;
+use std::sync::Arc;
 
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
@@ -117,6 +118,14 @@ struct CellExtra {
     /// base character and zerowidth characters).
     cell_with_zero_width: Option<String>,
     end_of_prompt: Option<EndOfPromptMarker>,
+    /// OSC 8 hyperlink URI attached to this cell, if any. Cells belonging to the same hyperlink
+    /// share a single `Arc`, so a contiguous run can be detected cheaply via `Arc::ptr_eq`.
+    ///
+    /// Skipped during (de)serialization: `Arc<str>` is not serde-serializable without the `rc`
+    /// feature, and link clickability need not survive session persistence — a deserialized cell
+    /// simply has no hyperlink (the field defaults to `None`).
+    #[serde(skip)]
+    hyperlink: Option<Arc<str>>,
 }
 
 /// Content and attributes of a single cell in the terminal grid.
@@ -274,6 +283,22 @@ impl Cell {
             .end_of_prompt = Some(EndOfPromptMarker {
             has_extra_trailing_newline,
         });
+    }
+
+    /// The OSC 8 hyperlink URI attached to this cell, if any.
+    #[inline]
+    pub fn hyperlink(&self) -> Option<&Arc<str>> {
+        self.extra.as_ref()?.hyperlink.as_ref()
+    }
+
+    /// Attach (or clear, with `None`) an OSC 8 hyperlink URI on this cell. Clearing when no extra
+    /// storage exists is a no-op, so non-hyperlinked cells never allocate.
+    #[inline]
+    pub fn set_hyperlink(&mut self, uri: Option<Arc<str>>) {
+        if uri.is_none() && self.extra.is_none() {
+            return;
+        }
+        self.extra.get_or_insert_with(Box::default).hyperlink = uri;
     }
 
     /// Free all dynamically allocated cell storage. Preserves EndOfPromptMarker if present.

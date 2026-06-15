@@ -2577,6 +2577,27 @@ impl BlockList {
             })
     }
 
+    pub fn image_tag_at_point(&self, point: &WithinBlock<Point>) -> Option<WithinBlock<Link>> {
+        let block_grid = match point.grid {
+            GridType::Output => self.blocks.get(point.block_index.0)?.output_grid(),
+            GridType::PromptAndCommand => self
+                .blocks
+                .get(point.block_index.0)?
+                .prompt_and_command_grid(),
+            GridType::Prompt => return None,
+            GridType::Rprompt => return None,
+        };
+
+        block_grid
+            .grid_handler
+            .image_tag_at_point(point.inner)
+            .map(|link| WithinBlock {
+                inner: link,
+                block_index: point.block_index,
+                grid: point.grid,
+            })
+    }
+
     pub fn is_bootstrapped(&self) -> bool {
         self.bootstrap_stage.is_bootstrapped()
     }
@@ -3606,6 +3627,10 @@ impl ansi::Handler for BlockList {
 
     fn terminal_attribute(&mut self, attr: Attr) {
         delegate!(self.terminal_attribute(attr));
+    }
+
+    fn set_hyperlink(&mut self, uri: Option<Arc<str>>) {
+        delegate!(self.set_hyperlink(uri));
     }
 
     fn set_mode(&mut self, mode: Mode) {

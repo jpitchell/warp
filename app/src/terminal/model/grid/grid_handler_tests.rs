@@ -607,6 +607,95 @@ fn test_secrets_serialization() {
 }
 
 #[test]
+fn url_at_point_returns_osc8_hyperlink() {
+    let mut blockgrid = mock_blockgrid("click here");
+    let uri: std::sync::Arc<str> = std::sync::Arc::from("https://anthropic.com");
+    // Tag the "here" run (cols 6..=9) with the same hyperlink Arc; "click " stays plain text.
+    for col in 6..=9 {
+        blockgrid.grid_storage_mut()[0][col].set_hyperlink(Some(uri.clone()));
+    }
+
+    let expected = Some(Link {
+        range: Point { row: 0, col: 6 }..=Point { row: 0, col: 9 },
+        is_empty: false,
+        uri: Some(uri.clone()),
+    });
+    // Hovering anywhere within the run resolves the explicit URI over the full run...
+    assert_eq!(
+        blockgrid
+            .grid_handler
+            .url_at_point(Point { row: 0, col: 6 }),
+        expected
+    );
+    assert_eq!(
+        blockgrid
+            .grid_handler
+            .url_at_point(Point { row: 0, col: 8 }),
+        expected
+    );
+    // ...while a plain cell outside the run yields no link (no URL scheme in the text either).
+    assert_eq!(
+        blockgrid
+            .grid_handler
+            .url_at_point(Point { row: 0, col: 0 }),
+        None
+    );
+}
+
+#[test]
+fn image_tag_at_point_detects_token() {
+    // "see [Image #12] here": the tag spans cols 4..=14 ('[' .. ']').
+    let blockgrid = mock_blockgrid("see [Image #12] here");
+    let expected = Some(Link {
+        range: Point { row: 0, col: 4 }..=Point { row: 0, col: 14 },
+        is_empty: false,
+        uri: None,
+    });
+    // Hovering anywhere within the token (the '[', a digit, or the ']') resolves the whole token.
+    for col in [4usize, 9, 13, 14] {
+        assert_eq!(
+            blockgrid
+                .grid_handler
+                .image_tag_at_point(Point { row: 0, col }),
+            expected,
+            "hovering col {col} should resolve the tag",
+        );
+    }
+    // Outside the token there is no match.
+    assert_eq!(
+        blockgrid
+            .grid_handler
+            .image_tag_at_point(Point { row: 0, col: 0 }),
+        None
+    );
+    assert_eq!(
+        blockgrid
+            .grid_handler
+            .image_tag_at_point(Point { row: 0, col: 16 }),
+        None
+    );
+}
+
+#[test]
+fn image_tag_at_point_rejects_non_image_brackets() {
+    let blockgrid = mock_blockgrid("[not an image] and [Image #x]");
+    // Bracketed text that isn't `Image #<digits>` is rejected.
+    assert_eq!(
+        blockgrid
+            .grid_handler
+            .image_tag_at_point(Point { row: 0, col: 3 }),
+        None
+    );
+    // `[Image #x]` has a non-numeric index, so it is not a valid tag.
+    assert_eq!(
+        blockgrid
+            .grid_handler
+            .image_tag_at_point(Point { row: 0, col: 24 }),
+        None
+    );
+}
+
+#[test]
 fn test_finds_url_in_grid() {
     // Test url in one line.
     let blockgrid = mock_blockgrid("https://google.com");
@@ -616,7 +705,8 @@ fn test_finds_url_in_grid() {
             .url_at_point(Point { row: 0, col: 0 }),
         Some(Link {
             range: Point { row: 0, col: 0 }..=Point { row: 0, col: 17 },
-            is_empty: false
+            is_empty: false,
+            uri: None,
         })
     );
     assert_eq!(
@@ -625,7 +715,8 @@ fn test_finds_url_in_grid() {
             .url_at_point(Point { row: 0, col: 17 }),
         Some(Link {
             range: Point { row: 0, col: 0 }..=Point { row: 0, col: 17 },
-            is_empty: false
+            is_empty: false,
+            uri: None,
         })
     );
 
@@ -643,7 +734,8 @@ fn test_finds_url_in_grid() {
             .url_at_point(Point { row: 0, col: 10 }),
         Some(Link {
             range: Point { row: 0, col: 4 }..=Point { row: 0, col: 21 },
-            is_empty: false
+            is_empty: false,
+            uri: None,
         })
     );
 }
@@ -657,7 +749,8 @@ fn test_find_url_line_wrapping() {
             .url_at_point(Point { row: 1, col: 0 }),
         Some(Link {
             range: Point { row: 0, col: 4 }..=Point { row: 1, col: 5 },
-            is_empty: false
+            is_empty: false,
+            uri: None,
         })
     );
     assert_eq!(
@@ -666,7 +759,8 @@ fn test_find_url_line_wrapping() {
             .url_at_point(Point { row: 0, col: 15 }),
         Some(Link {
             range: Point { row: 0, col: 4 }..=Point { row: 1, col: 5 },
-            is_empty: false
+            is_empty: false,
+            uri: None,
         })
     );
 }
@@ -681,7 +775,8 @@ fn test_find_url_with_delimiter() {
             .url_at_point(Point { row: 0, col: 0 }),
         Some(Link {
             range: Point { row: 0, col: 0 }..=Point { row: 0, col: 17 },
-            is_empty: false
+            is_empty: false,
+            uri: None,
         })
     );
 
@@ -692,7 +787,8 @@ fn test_find_url_with_delimiter() {
             .url_at_point(Point { row: 0, col: 0 }),
         Some(Link {
             range: Point { row: 0, col: 0 }..=Point { row: 0, col: 31 },
-            is_empty: false
+            is_empty: false,
+            uri: None,
         })
     );
 }
@@ -718,7 +814,8 @@ fn test_find_url_wide_characters() {
             .url_at_point(Point { row: 0, col: 5 }),
         Some(Link {
             range: Point { row: 0, col: 0 }..=Point { row: 0, col: 25 },
-            is_empty: false
+            is_empty: false,
+            uri: None,
         })
     );
 }
@@ -733,7 +830,8 @@ fn test_find_url_omits_trailing_periods() {
             .url_at_point(Point { row: 0, col: 10 }),
         Some(Link {
             range: Point { row: 0, col: 6 }..=Point { row: 0, col: 46 },
-            is_empty: false
+            is_empty: false,
+            uri: None,
         })
     );
     assert_eq!(
@@ -751,7 +849,8 @@ fn test_find_url_omits_trailing_periods() {
             .url_at_point(Point { row: 0, col: 10 }),
         Some(Link {
             range: Point { row: 0, col: 6 }..=Point { row: 0, col: 46 },
-            is_empty: false
+            is_empty: false,
+            uri: None,
         })
     );
     assert_eq!(
@@ -769,7 +868,8 @@ fn test_find_url_omits_trailing_periods() {
             .url_at_point(Point { row: 0, col: 10 }),
         Some(Link {
             range: Point { row: 0, col: 6 }..=Point { row: 0, col: 44 },
-            is_empty: false
+            is_empty: false,
+            uri: None,
         })
     );
     assert_eq!(
@@ -778,7 +878,8 @@ fn test_find_url_omits_trailing_periods() {
             .url_at_point(Point { row: 0, col: 33 }),
         Some(Link {
             range: Point { row: 0, col: 6 }..=Point { row: 0, col: 44 },
-            is_empty: false
+            is_empty: false,
+            uri: None,
         })
     );
 }
@@ -792,7 +893,8 @@ fn test_find_url_with_percent() {
             .url_at_point(Point { row: 0, col: 55 }),
         Some(Link {
             range: Point { row: 0, col: 17 }..=Point { row: 0, col: 58 },
-            is_empty: false
+            is_empty: false,
+            uri: None,
         })
     );
 }
@@ -812,7 +914,8 @@ d/to/make/it/longer/still/so/adding/more/segments/here/and/there/plus/some/query
             .url_at_point(Point { row: 3, col: 14 }),
         Some(Link {
             range: Point { row: 0, col: 13 }..=Point { row: 3, col: 46 },
-            is_empty: false
+            is_empty: false,
+            uri: None,
         })
     );
 }
@@ -843,7 +946,8 @@ s some more content over here\n\
             .url_at_point(Point { row: 12, col: 52 }),
         Some(Link {
             range: Point { row: 0, col: 13 }..=Point { row: 12, col: 52 },
-            is_empty: false
+            is_empty: false,
+            uri: None,
         })
     );
 }

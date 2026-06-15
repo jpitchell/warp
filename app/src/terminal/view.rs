@@ -16378,7 +16378,7 @@ impl TerminalView {
                 match highlighted_link {
                     GridHighlightedLink::Url(url) => {
                         let url_content =
-                            Some(model.link_at_range(url, RespectObfuscatedSecrets::Yes));
+                            Some(model.url_link_target(url, RespectObfuscatedSecrets::Yes));
                         url_content
                             .map(|url_content| {
                                 vec![MenuItemFields::new("Copy URL")
@@ -18229,7 +18229,7 @@ impl TerminalView {
             GridHighlightedLink::Url(url) if url.contains(position) => {
                 let model = self.model.lock();
                 ctx.notify();
-                ctx.open_url(&model.link_at_range(url, RespectObfuscatedSecrets::No));
+                ctx.open_url(&model.url_link_target(url, RespectObfuscatedSecrets::No));
             }
             _ => (),
         }

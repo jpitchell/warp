@@ -22,6 +22,8 @@ cfg_if::cfg_if! {
         };
         use crate::search::files::model::FileSearchModel;
         use crate::search::files::search_item::FileSearchResult;
+        use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
+        use crate::terminal::cli_agent_sessions::plugin_manager::claude::claude_home_dir;
         use std::collections::HashMap;
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -49,6 +51,42 @@ const SUFFIXES_TO_REMOVE: [&str; 1] = ["@"];
 #[cfg(feature = "local_fs")]
 fn file_basename(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+/// Extract the number from an `[Image #N]` tag's rendered text. The grid-side detector already
+/// validated the shape; this re-reads it from the link text and tolerates surrounding whitespace.
+#[cfg(feature = "local_fs")]
+fn parse_image_tag_number(tag_text: &str) -> Option<String> {
+    let inner = tag_text
+        .trim()
+        .strip_prefix("[Image #")?
+        .strip_suffix(']')?;
+    (!inner.is_empty() && inner.bytes().all(|b| b.is_ascii_digit())).then(|| inner.to_owned())
+}
+
+/// Build a `File` highlighted link for an image tag, preserving the tag's model location (alt
+/// screen vs. block list) so highlight and click target the correct cells.
+#[cfg(feature = "local_fs")]
+fn image_tag_file_link(tag: WithinModel<Link>, absolute_path: PathBuf) -> WithinModel<FileLink> {
+    match tag {
+        WithinModel::AltScreen(link) => WithinModel::AltScreen(FileLink {
+            link,
+            absolute_path,
+            line_and_column_num: None,
+        }),
+        WithinModel::BlockList(within_block) => {
+            let file_link = FileLink {
+                link: within_block.inner,
+                absolute_path,
+                line_and_column_num: None,
+            };
+            WithinModel::BlockList(WithinBlock::new(
+                file_link,
+                within_block.block_index,
+                within_block.grid,
+            ))
+        }
+    }
 }
 
 /// Wraps `inner` in the same model location (alt screen vs. block list) as `possible_path`, so a
@@ -365,14 +403,31 @@ impl super::TerminalView {
             )
         };
 
-        match (url_at_point, &self.last_hover_fragment_boundary) {
-            (Some(url), _) => {
+        // CLI-agent `[Image #N]` tags resolve synchronously to the session's cached image file.
+        // The cheap token scan inside `image_tag_link_at_point` gates the filesystem lookup, so
+        // this only touches disk when the cursor is actually over a tag.
+        #[cfg(feature = "local_fs")]
+        let image_link = if url_at_point.is_none() && self.should_detect_cli_agent_file_links(ctx) {
+            self.image_tag_link_at_point(position, ctx)
+        } else {
+            None
+        };
+        #[cfg(not(feature = "local_fs"))]
+        let image_link: Option<GridHighlightedLink> = None;
+
+        match (url_at_point, image_link, &self.last_hover_fragment_boundary) {
+            (Some(url), _, _) => {
                 self.highlighted_link
                     .set(GridHighlightedLink::Url(url), &mut self.model.lock());
                 new_cursor_shape = Some(Cursor::PointingHand);
             }
+            (_, Some(image_link), _) => {
+                self.highlighted_link
+                    .set(image_link, &mut self.model.lock());
+                new_cursor_shape = Some(Cursor::PointingHand);
+            }
             // Only scan for links if the mouse hovered on a new word.
-            (_, Some(last_hover_fragment_boundary))
+            (_, _, Some(last_hover_fragment_boundary))
                 if !last_hover_fragment_boundary.contains(position) =>
             {
                 // Use try_send to return an error directly when the channel is full
@@ -383,7 +438,7 @@ impl super::TerminalView {
                 });
             }
             // If there's no last hover fragment boundary, we scan for links.
-            (_, None) => {
+            (_, _, None) => {
                 let _ = self.find_link_tx.try_send(FindLinkArg {
                     position: *position,
                     from_editor,
@@ -456,7 +511,7 @@ impl super::TerminalView {
             }
             GridHighlightedLink::Url(url) => {
                 let model = self.model.lock();
-                ctx.open_url(&model.link_at_range(url, RespectObfuscatedSecrets::No));
+                ctx.open_url(&model.url_link_target(url, RespectObfuscatedSecrets::No));
             }
         };
     }
@@ -586,6 +641,46 @@ impl super::TerminalView {
         FeatureFlag::CliAgentFileLinks.is_enabled()
             && *GeneralSettings::as_ref(ctx).cli_agent_file_links
             && self.has_active_cli_agent_session(ctx)
+    }
+
+    /// Resolve a hovered `[Image #N]` tag to a clickable file link pointing at the session's
+    /// cached image. Returns `None` when the cursor isn't over a tag, there's no active session
+    /// id, or the cached file is missing.
+    fn image_tag_link_at_point(
+        &self,
+        position: &WithinModel<Point>,
+        ctx: &AppContext,
+    ) -> Option<GridHighlightedLink> {
+        let (tag, tag_text) = {
+            let model = self.model.lock();
+            let tag = model.image_tag_at_point(position)?;
+            let tag_text = model.string_at_range(&tag, RespectObfuscatedSecrets::No);
+            (tag, tag_text)
+        };
+        let number = parse_image_tag_number(&tag_text)?;
+        let path = self.resolve_image_tag_path(&number, ctx)?;
+        Some(GridHighlightedLink::File(image_tag_file_link(tag, path)))
+    }
+
+    /// Map an `[Image #N]` tag to `<claude-home>/image-cache/<session-id>/N.<ext>`. The image-cache
+    /// directory is keyed by the active Claude session id, so this is deterministic and correct
+    /// even for tags scrolled up in history. Returns `None` if there's no session id or no matching
+    /// file on disk.
+    fn resolve_image_tag_path(&self, number: &str, ctx: &AppContext) -> Option<PathBuf> {
+        let session_id = CLIAgentSessionsModel::as_ref(ctx)
+            .session(self.view_id)?
+            .session_context
+            .session_id
+            .clone()?;
+        let session_dir = claude_home_dir().ok()?.join("image-cache").join(session_id);
+        // Claude numbers cached images `N.<ext>` within the session directory; match on the file
+        // stem so any image extension (png/jpeg/...) resolves. `read_dir` failing (e.g. the dir
+        // doesn't exist) yields `None`.
+        std::fs::read_dir(session_dir)
+            .ok()?
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| path.file_stem().and_then(|stem| stem.to_str()) == Some(number))
     }
 
     fn compute_valid_paths(
@@ -818,6 +913,7 @@ impl super::TerminalView {
             link: Link {
                 range: path_range,
                 is_empty: false,
+                uri: None,
             },
             query,
         };
@@ -834,6 +930,7 @@ impl super::TerminalView {
             link: Link {
                 range: path_range,
                 is_empty: false,
+                uri: None,
             },
             absolute_path,
             line_and_column_num,
