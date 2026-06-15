@@ -23,6 +23,12 @@ else
 fi
 [ -z "$cwd" ] && exit 0
 
+# Warp percent-decodes the OSC 7 path, but only transforms `%XX` escapes and passes
+# every other byte through unchanged. So escaping a literal `%` as `%25` is enough to
+# round-trip any path (e.g. a directory named "100%done" or "a%2Fb"); other bytes such
+# as spaces or UTF-8 need no encoding here.
+cwd=${cwd//%/%25}
+
 # Resolve the terminal device: the controlling tty if we have one, otherwise the
 # tty of the nearest ancestor process that owns one.
 dev=/dev/tty

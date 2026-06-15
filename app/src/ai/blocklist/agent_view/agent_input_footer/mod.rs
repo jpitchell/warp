@@ -233,6 +233,12 @@ pub struct AgentInputFooter {
     /// cwd/git-branch cards follow Claude mid-session. Claude sessions only.
     install_hook_button: ViewHandle<ActionButton>,
     dismiss_hook_chip_button: ViewHandle<ActionButton>,
+    /// Cached result of [`claude_hook::is_hook_installed`], so the install chip's
+    /// gating doesn't hit the disk on every render. Computed lazily, invalidated
+    /// after we install the hook ourselves. (Only read off-wasm, where the chip
+    /// can actually show.)
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
+    claude_hook_installed: std::cell::Cell<Option<bool>>,
     plugin_operation_in_progress: bool,
     /// When `true`, the install chip is allowed to render.
     /// Starts `false` and is set to `true` after a debounce timer fires,
@@ -879,6 +885,7 @@ impl AgentInputFooter {
             dismiss_plugin_chip_button,
             install_hook_button,
             dismiss_hook_chip_button,
+            claude_hook_installed: std::cell::Cell::new(None),
             plugin_operation_in_progress: false,
             plugin_chip_ready: false,
             context_window_button,
@@ -1523,12 +1530,37 @@ impl AgentInputFooter {
     /// Whether to show the "Sync directory" chip offering to install the Claude
     /// Code cwd hook. Only for Claude sessions, when the hook isn't installed and
     /// the prompt hasn't been dismissed.
+    ///
+    /// Never shown on wasm: the hook installs into the local `~/.claude/` and there
+    /// is no local filesystem (or local Claude Code process) on the web build, so
+    /// the chip would be non-functional.
     fn should_show_claude_hook_chip(&self, app: &AppContext) -> bool {
-        matches!(self.cli_agent(app), Some(CLIAgent::Claude))
-            && !*GeneralSettings::as_ref(app)
-                .claude_cwd_hook_prompt_dismissed
-                .value()
-            && !claude_hook::is_hook_installed()
+        #[cfg(target_family = "wasm")]
+        {
+            let _ = app;
+            false
+        }
+        #[cfg(not(target_family = "wasm"))]
+        {
+            matches!(self.cli_agent(app), Some(CLIAgent::Claude))
+                && !*GeneralSettings::as_ref(app)
+                    .claude_cwd_hook_prompt_dismissed
+                    .value()
+                && !self.claude_hook_is_installed()
+        }
+    }
+
+    /// Memoized [`claude_hook::is_hook_installed`]. The underlying check does
+    /// synchronous disk reads + JSON parsing, so we cache the result and only
+    /// recompute after invalidating it (e.g. once we install the hook ourselves).
+    #[cfg(not(target_family = "wasm"))]
+    fn claude_hook_is_installed(&self) -> bool {
+        if let Some(installed) = self.claude_hook_installed.get() {
+            return installed;
+        }
+        let installed = claude_hook::is_hook_installed();
+        self.claude_hook_installed.set(Some(installed));
+        installed
     }
 
     fn render_cli_mode_footer(&self, app: &AppContext) -> Box<dyn Element> {
@@ -2664,6 +2696,8 @@ impl TypedActionView for AgentInputFooter {
                 if let Err(e) = claude_hook::install_hook() {
                     log::error!("Failed to install Claude Code cwd hook: {e:#}");
                 }
+                // Force the gating check to re-read install state on next render.
+                self.claude_hook_installed.set(None);
                 ctx.notify();
             }
             AgentInputFooterAction::DismissClaudeCwdHookChip => {
