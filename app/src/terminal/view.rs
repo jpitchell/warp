@@ -8961,14 +8961,22 @@ impl TerminalView {
         }
     }
 
-    /// Handles a file-tree drag-and-drop onto the terminal by piping the dropped text
-    /// through the same path as user-typed characters for the active command.
+    /// Handles a file-tree (Files panel) drag-and-drop onto the terminal by
+    /// delivering the dropped text to the active command. When a TUI program is
+    /// running (e.g. Claude Code) this writes to the PTY with bracketed paste,
+    /// matching the OS-level drop and Cmd+V; otherwise it inserts into the editor.
     pub fn handle_file_tree_drop_on_active_command(
         &mut self,
         text: &str,
         ctx: &mut ViewContext<Self>,
     ) {
-        self.typed_characters_on_terminal(text, ctx);
+        let is_in_long_running_command = self
+            .model
+            .lock()
+            .block_list()
+            .active_block()
+            .is_active_and_long_running();
+        self.deliver_dropped_text_to_active_command(text, is_in_long_running_command, ctx);
     }
 
     fn set_marked_text_on_terminal(
@@ -23553,6 +23561,18 @@ impl TerminalView {
             alt_screen_element,
         );
 
+        // Register a terminal drop target over the alt-screen so the in-app Files
+        // panel can drop file paths onto a running TUI (e.g. Claude Code). The
+        // block list registers the same target when not in alt-screen; without
+        // this, the internal drag has no terminal target to land on here.
+        let element = DropTarget::new(
+            element,
+            TerminalDropTargetData {
+                terminal_view: self.view_handle.clone(),
+            },
+        )
+        .finish();
+
         SavePosition::new(
             Container::new(
                 Align::new(
@@ -25320,9 +25340,49 @@ impl TerminalView {
                 paths
             };
 
-            let input =
-                warpui::clipboard_utils::escaped_paths_str(paths, Some(self.shell_family(ctx)));
-            self.typed_characters_on_terminal(&input, ctx);
+            // Mirror `TerminalView::paste` so a dropped path lands in a running
+            // program (e.g. the Claude Code TUI) exactly like Cmd+V does. When a
+            // CLI agent owns the foreground and its rich input is closed, skip
+            // shell-escaping so the agent sees a clean path it can resolve
+            // natively; otherwise shell-escape as before.
+            let is_cli_agent_drop = is_in_long_running_command
+                && self.has_active_cli_agent_session(ctx)
+                && !CLIAgentSessionsModel::as_ref(ctx).is_input_open(self.view_id);
+            let shell_family = if is_cli_agent_drop {
+                None
+            } else {
+                Some(self.shell_family(ctx))
+            };
+            let input = warpui::clipboard_utils::escaped_paths_str(paths, shell_family);
+
+            self.deliver_dropped_text_to_active_command(&input, is_in_long_running_command, ctx);
+        }
+    }
+
+    /// Delivers dropped text (an already-prepared file path or paths) to the
+    /// foreground of the active block. When a program is running we mirror
+    /// `TerminalView::paste`: write to the PTY, normalizing newlines and wrapping
+    /// in bracketed paste when the program enabled it (true for TUI CLI agents
+    /// like Claude Code). Otherwise we insert into the command editor, as before.
+    ///
+    /// Shared by the OS-level file drop (`drag_and_drop_files`) and the in-app
+    /// Files-panel drop (`handle_file_tree_drop_on_active_command`) so both behave
+    /// identically over a running TUI.
+    fn deliver_dropped_text_to_active_command(
+        &mut self,
+        text: &str,
+        is_in_long_running_command: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if is_in_long_running_command {
+            let needs_bracketed_paste = self.model.lock().needs_bracketed_paste();
+            let mut payload = LINEFEED_REGEX.replace_all(text, "\r").to_string();
+            if needs_bracketed_paste {
+                payload = format!("{BRACKETED_PASTE_PREFIX}{payload}{BRACKETED_PASTE_SUFFIX}");
+            }
+            self.write_user_bytes_to_pty(payload.into_bytes(), ctx);
+        } else {
+            self.typed_characters_on_terminal(text, ctx);
         }
     }
 
