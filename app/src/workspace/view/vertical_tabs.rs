@@ -2091,6 +2091,12 @@ fn render_tab_group_internal(
         .show_tab_right_click_menu
         .is_some_and(|(idx, _)| idx == tab_index);
     let is_drag_target = workspace.hovered_tab_index == Some(TabBarHoverIndex::OverTab(tab_index));
+    // True while another tab is being dragged onto this one to form a group
+    // (drag-to-create-group). Rendered with a stronger accent than the ordinary
+    // drag-over highlight so "release to group" reads distinctly.
+    let is_group_drop_target = workspace
+        .tab_drag_group_target
+        .is_some_and(|target| target.target_index == tab_index);
     let summary = matches!(resolved_mode, VerticalTabsResolvedMode::Summary)
         .then(|| build_vertical_tabs_summary_data(pane_group, &visible_pane_ids, app));
     let summary_pane_kind_icons = matches!(resolved_mode, VerticalTabsResolvedMode::Summary)
@@ -2262,7 +2268,9 @@ fn render_tab_group_internal(
                     .with_padding(body_padding)
                     .finish(),
             );
-            let background = if is_drag_target {
+            let background = if is_group_drop_target {
+                internal_colors::accent_bg(theme)
+            } else if is_drag_target {
                 internal_colors::fg_overlay_2(theme)
             } else if is_active || group_state.is_hovered() {
                 internal_colors::fg_overlay_1(theme)
@@ -2270,7 +2278,11 @@ fn render_tab_group_internal(
                 ThemeFill::Solid(ColorU::transparent_black())
             };
             let mut container = Container::new(group.finish()).with_background(background);
-            if is_drag_target {
+            if is_group_drop_target {
+                container = container.with_border(
+                    Border::all(2.).with_border_fill(ThemeFill::Solid(theme.accent().into())),
+                );
+            } else if is_drag_target {
                 container = container.with_border(
                     Border::all(1.).with_border_fill(ThemeFill::Solid(theme.accent().into())),
                 );
@@ -2288,7 +2300,9 @@ fn render_tab_group_internal(
             // per-tab background here and let each row show its own
             // selected/hovered state.
             let allow_per_tab_highlight = !in_tab_group || FeatureFlag::GroupedTabs.is_enabled();
-            let background = if is_drag_target {
+            let background = if is_group_drop_target {
+                internal_colors::accent_bg(theme)
+            } else if is_drag_target {
                 internal_colors::fg_overlay_2(theme)
             } else if allow_per_tab_highlight && (is_active || group_state.is_hovered()) {
                 internal_colors::fg_overlay_1(theme)
@@ -2309,7 +2323,11 @@ fn render_tab_group_internal(
                 container = container
                     .with_corner_radius(CornerRadius::with_all(Radius::Pixels(ROW_CORNER_RADIUS)));
             }
-            if is_drag_target {
+            if is_group_drop_target {
+                container = container.with_border(
+                    Border::all(2.).with_border_fill(ThemeFill::Solid(theme.accent().into())),
+                );
+            } else if is_drag_target {
                 container = container.with_border(
                     Border::all(1.).with_border_fill(ThemeFill::Solid(theme.accent().into())),
                 );

@@ -693,6 +693,13 @@ default = [
     # (including the warp-oss DMG), without needing --features.
     "source_control_panel",
     "cli_agent_file_links",
+    # Fork: ship grouped tabs and cross-window tab dragging on by default.
+    # vertical_tabs is already in this list above; adding these enables
+    # FeatureFlag::GroupedTabs / FeatureFlag::DragTabsToWindows at runtime on
+    # every channel (including the warp-oss DMG), without needing --features.
+    # This is what makes the drag-a-tab-onto-another grouping feature reachable.
+    "grouped_tabs",
+    "drag_tabs_to_windows",
 ]
 # Enable this feature to automatically perform heap profiling.  NOTE: This will
 # substantially slow down program execution.

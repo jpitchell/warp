@@ -29,7 +29,9 @@ use warp::integration_testing::workspace::{
 };
 use warp::settings::PaneSettings;
 use warp::terminal::shell::ShellType;
-use warp::workspace::tab_settings::{TabSettings, VerticalTabsDisplayGranularity};
+use warp::workspace::tab_settings::{
+    TabSettings, VerticalTabsDisplayGranularity, VerticalTabsViewMode,
+};
 use warp::workspace::{WorkspaceAction, NEW_TAB_BUTTON_POSITION_ID};
 use warpui_core::event::{Event, ModifiersState};
 use warpui_core::integration::{AssertionCallback, AssertionOutcome, TestStep};
@@ -648,6 +650,451 @@ pub fn test_close_tab_with_long_running_process() -> Builder {
         )
         .with_step(press_native_modal_button(0))
         .with_step(TestStep::new("Wait for tab to close").add_assertion(assert_tab_count(1)))
+}
+
+/// Saved-position id of the focused-pane row for `tab_index` in the vertical
+/// sidebar. Unlike `tab_position_id`, this is unique to the sidebar (the
+/// horizontal bar also saves `tab_position_*`), so it reliably targets the
+/// rendered sidebar member.
+fn vertical_tab_row_position_id_for_tab(
+    app: &mut warpui_core::App,
+    window_id: WindowId,
+    tab_index: usize,
+) -> String {
+    let workspace = workspace_view(app, window_id);
+    let pane_group = workspace.read(app, |workspace, _ctx| {
+        workspace
+            .get_pane_group_view(tab_index)
+            .expect("pane group should exist")
+            .clone()
+    });
+    let pane_group_id = pane_group.id();
+    pane_group.read(app, |pane_group, ctx| {
+        let pane_id = pane_group.focused_pane_id(ctx);
+        format!("vertical_tabs:pane_row:{pane_group_id:?}:{pane_id}")
+    })
+}
+
+/// Window-local bounds of the vertical sidebar row for `tab_index`.
+fn vertical_tab_row_bounds(
+    app: &mut warpui_core::App,
+    window_id: WindowId,
+    tab_index: usize,
+) -> RectF {
+    let id = vertical_tab_row_position_id_for_tab(app, window_id, tab_index);
+    let presenter = app.presenter(window_id).expect("presenter should exist");
+    let bounds = presenter
+        .borrow()
+        .position_cache()
+        .get_position(&id)
+        .unwrap_or_else(|| panic!("vertical tab row {tab_index} should exist for {window_id:?}"));
+    bounds
+}
+
+/// Groups tabs 0 and 1 into a single tab group (tab 0 anchors the group).
+fn group_first_two_tabs() -> TestStep {
+    TestStep::new("Group the first two tabs").with_action(|app, window_id, _| {
+        let workspace = workspace_view(app, window_id);
+        workspace.update(app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::NewTabGroupFromTab(0), ctx);
+        });
+        let group_id = workspace.read(app, |workspace, _ctx| {
+            workspace
+                .tab_group_id_at(0)
+                .expect("tab 0 should belong to the new group")
+        });
+        workspace.update(app, |workspace, ctx| {
+            workspace.assign_tab_to_group(1, Some(group_id), ctx);
+        });
+    })
+}
+
+/// Enables vertical tabs with a specific display granularity and view-mode
+/// (density), plus the grouped-tabs feature flag.
+fn enable_grouped_vertical_tabs(
+    granularity: VerticalTabsDisplayGranularity,
+    view_mode: VerticalTabsViewMode,
+) -> TestStep {
+    FeatureFlag::VerticalTabs.set_enabled(true);
+    FeatureFlag::GroupedTabs.set_enabled(true);
+    new_step_with_default_assertions("Enable grouped vertical tabs").add_assertion(
+        move |app, _window_id| {
+            TabSettings::handle(app).update(app, |settings, ctx| {
+                settings
+                    .use_vertical_tabs
+                    .set_value(true, ctx)
+                    .expect("vertical tabs setting should update");
+                settings
+                    .vertical_tabs_display_granularity
+                    .set_value(granularity, ctx)
+                    .expect("vertical tabs display granularity should update");
+                settings
+                    .vertical_tabs_view_mode
+                    .set_value(view_mode, ctx)
+                    .expect("vertical tabs view mode should update");
+                async_assert!(
+                    *settings.use_vertical_tabs
+                        && *settings.vertical_tabs_display_granularity.value() == granularity
+                        && *settings.vertical_tabs_view_mode.value() == view_mode
+                )
+            })
+        },
+    )
+}
+
+/// Drags the first member of a two-tab group downward, out of the group, in the
+/// vertical sidebar. Expected end state: one tab is ungrouped. Parameterized
+/// over the rendering config (granularity / density / cross-window drag) so we
+/// can pin down which configuration breaks per-tab dragging.
+fn drag_first_member_out_of_group_builder(
+    granularity: VerticalTabsDisplayGranularity,
+    view_mode: VerticalTabsViewMode,
+    enable_drag_to_windows: bool,
+) -> Builder {
+    FeatureFlag::GroupedTabs.set_enabled(true);
+    if enable_drag_to_windows {
+        FeatureFlag::DragTabsToWindows.set_enabled(true);
+    }
+    new_builder()
+        .with_step(wait_until_bootstrapped_single_pane_for_tab(0))
+        .with_step(
+            new_step_with_default_assertions("Open a second tab")
+                .with_keystrokes(&[cmd_or_ctrl_shift("t")]),
+        )
+        .with_step(wait_until_bootstrapped_single_pane_for_tab(1))
+        .with_step(enable_grouped_vertical_tabs(granularity, view_mode))
+        .with_step(group_first_two_tabs())
+        .with_step(
+            new_step_with_default_assertions("Both tabs share a group before dragging")
+                .add_named_assertion("both grouped", |app, window_id| {
+                    let workspace = workspace_view(app, window_id);
+                    let grouped = workspace.read(app, |ws, _ctx| {
+                        ws.tab_group_id_at(0).is_some() && ws.tab_group_id_at(1).is_some()
+                    });
+                    async_assert!(grouped)
+                }),
+        )
+        .with_step(
+            TestStep::new("Drag the first member down out of the group")
+                .with_action(|app, window_id, _| {
+                    let start = vertical_tab_row_bounds(app, window_id, 0).center();
+                    dispatch_mouse_event(
+                        app,
+                        window_id,
+                        Event::LeftMouseDown {
+                            position: start,
+                            modifiers: ModifiersState::default(),
+                            click_count: 1,
+                            is_first_mouse: false,
+                        },
+                    );
+                })
+                .with_action(|app, window_id, _| {
+                    let start = vertical_tab_row_bounds(app, window_id, 0).center();
+                    dispatch_mouse_event(
+                        app,
+                        window_id,
+                        Event::LeftMouseDragged {
+                            position: start + vec2f(0.0, 8.0),
+                            modifiers: ModifiersState::default(),
+                        },
+                    );
+                })
+                .with_action(|app, window_id, _| {
+                    let last = vertical_tab_row_bounds(app, window_id, 1);
+                    let target = vec2f(last.center().x(), last.max_y() + 40.0);
+                    dispatch_mouse_event(
+                        app,
+                        window_id,
+                        Event::LeftMouseDragged {
+                            position: target,
+                            modifiers: ModifiersState::default(),
+                        },
+                    );
+                })
+                .with_action(|app, window_id, _| {
+                    let last = vertical_tab_row_bounds(app, window_id, 1);
+                    let target = vec2f(last.center().x(), last.max_y() + 40.0);
+                    dispatch_mouse_event(
+                        app,
+                        window_id,
+                        Event::LeftMouseUp {
+                            position: target,
+                            modifiers: ModifiersState::default(),
+                        },
+                    );
+                })
+                .add_named_assertion("a tab left the group", |app, window_id| {
+                    let workspace = workspace_view(app, window_id);
+                    let any_ungrouped = workspace.read(app, |ws, _ctx| {
+                        (0..ws.tab_count()).any(|i| ws.tab_group_id_at(i).is_none())
+                    });
+                    async_assert!(any_ungrouped)
+                }),
+        )
+}
+
+/// Full user-reported config: Panes granularity, Expanded density, cross-window
+/// drag enabled.
+pub fn test_drag_vertical_tab_out_of_group() -> Builder {
+    drag_first_member_out_of_group_builder(
+        VerticalTabsDisplayGranularity::Panes,
+        VerticalTabsViewMode::Expanded,
+        true,
+    )
+}
+
+/// HOVER the member first (which raises the "details on hover" overlay, on by
+/// default), then press and drag. Asserts the per-tab draggable wins the
+/// mouse-down rather than the group draggable swallowing it.
+pub fn test_drag_vertical_tab_after_hover() -> Builder {
+    FeatureFlag::GroupedTabs.set_enabled(true);
+    FeatureFlag::DragTabsToWindows.set_enabled(true);
+    new_builder()
+        .with_step(wait_until_bootstrapped_single_pane_for_tab(0))
+        .with_step(
+            new_step_with_default_assertions("Open a second tab")
+                .with_keystrokes(&[cmd_or_ctrl_shift("t")]),
+        )
+        .with_step(wait_until_bootstrapped_single_pane_for_tab(1))
+        .with_step(enable_grouped_vertical_tabs(
+            VerticalTabsDisplayGranularity::Panes,
+            VerticalTabsViewMode::Expanded,
+        ))
+        .with_step(group_first_two_tabs())
+        .with_step(
+            new_step_with_default_assertions("Hover the first member to raise the detail overlay")
+                .with_action(|app, window_id, _| {
+                    let center = vertical_tab_row_bounds(app, window_id, 0).center();
+                    dispatch_mouse_event(
+                        app,
+                        window_id,
+                        Event::MouseMoved {
+                            position: center,
+                            cmd: false,
+                            shift: false,
+                            is_synthetic: false,
+                        },
+                    );
+                })
+                .add_named_assertion("both still grouped after hover", |app, window_id| {
+                    let workspace = workspace_view(app, window_id);
+                    let grouped = workspace.read(app, |ws, _ctx| {
+                        ws.tab_group_id_at(0).is_some() && ws.tab_group_id_at(1).is_some()
+                    });
+                    async_assert!(grouped)
+                }),
+        )
+        .with_step(
+            TestStep::new("Press and begin dragging the hovered member")
+                .with_action(|app, window_id, _| {
+                    let center = vertical_tab_row_bounds(app, window_id, 0).center();
+                    dispatch_mouse_event(
+                        app,
+                        window_id,
+                        Event::LeftMouseDown {
+                            position: center,
+                            modifiers: ModifiersState::default(),
+                            click_count: 1,
+                            is_first_mouse: false,
+                        },
+                    );
+                })
+                .with_action(|app, window_id, _| {
+                    let center = vertical_tab_row_bounds(app, window_id, 0).center();
+                    dispatch_mouse_event(
+                        app,
+                        window_id,
+                        Event::LeftMouseDragged {
+                            position: center + vec2f(0.0, 16.0),
+                            modifiers: ModifiersState::default(),
+                        },
+                    );
+                })
+                .add_named_assertion("per-tab draggable wins, not group", |app, window_id| {
+                    let workspace = workspace_view(app, window_id);
+                    let (any_tab_dragging, any_group_dragging) = workspace.read(app, |ws, _ctx| {
+                        let any_tab = (0..ws.tab_count()).any(|i| ws.is_tab_dragging(i));
+                        (any_tab, ws.is_any_group_dragging())
+                    });
+                    async_assert!(any_tab_dragging && !any_group_dragging)
+                }),
+        )
+}
+
+/// Reproduction with a MULTI-PANE tab (the user's failing config): tab 0 is
+/// split into two panes, grouped with single-pane tab 1, rendered in Panes
+/// granularity. Dragging one of tab 0's pane rows should drag that tab out via
+/// the per-tab draggable, not drag the whole group.
+pub fn test_drag_vertical_multipane_tab_out_of_group() -> Builder {
+    FeatureFlag::GroupedTabs.set_enabled(true);
+    FeatureFlag::DragTabsToWindows.set_enabled(true);
+    new_builder()
+        .with_step(wait_until_bootstrapped_single_pane_for_tab(0))
+        .with_step(
+            new_step_with_default_assertions("Split tab 0 into two panes")
+                .with_keystrokes(&[cmd_or_ctrl_shift("d")]),
+        )
+        .with_step(wait_until_bootstrapped_pane(0, 1))
+        .with_step(
+            new_step_with_default_assertions("Open a second tab")
+                .with_keystrokes(&[cmd_or_ctrl_shift("t")]),
+        )
+        .with_step(wait_until_bootstrapped_single_pane_for_tab(1))
+        .with_step(enable_grouped_vertical_tabs(
+            VerticalTabsDisplayGranularity::Panes,
+            VerticalTabsViewMode::Expanded,
+        ))
+        .with_step(group_first_two_tabs())
+        .with_step(
+            new_step_with_default_assertions("Both tabs grouped before dragging")
+                .add_named_assertion("both grouped", |app, window_id| {
+                    let workspace = workspace_view(app, window_id);
+                    let grouped = workspace.read(app, |ws, _ctx| {
+                        ws.tab_group_id_at(0).is_some() && ws.tab_group_id_at(1).is_some()
+                    });
+                    async_assert!(grouped)
+                }),
+        )
+        .with_step(
+            TestStep::new("Press and begin dragging a pane row of the multi-pane tab")
+                .with_action(|app, window_id, _| {
+                    let center = vertical_tab_row_bounds(app, window_id, 0).center();
+                    dispatch_mouse_event(
+                        app,
+                        window_id,
+                        Event::MouseMoved {
+                            position: center,
+                            cmd: false,
+                            shift: false,
+                            is_synthetic: false,
+                        },
+                    );
+                })
+                .with_action(|app, window_id, _| {
+                    let center = vertical_tab_row_bounds(app, window_id, 0).center();
+                    dispatch_mouse_event(
+                        app,
+                        window_id,
+                        Event::LeftMouseDown {
+                            position: center,
+                            modifiers: ModifiersState::default(),
+                            click_count: 1,
+                            is_first_mouse: false,
+                        },
+                    );
+                })
+                .with_action(|app, window_id, _| {
+                    let center = vertical_tab_row_bounds(app, window_id, 0).center();
+                    dispatch_mouse_event(
+                        app,
+                        window_id,
+                        Event::LeftMouseDragged {
+                            position: center + vec2f(0.0, 16.0),
+                            modifiers: ModifiersState::default(),
+                        },
+                    );
+                })
+                .add_named_assertion("per-tab draggable wins, not group", |app, window_id| {
+                    let workspace = workspace_view(app, window_id);
+                    let (any_tab_dragging, any_group_dragging) = workspace.read(app, |ws, _ctx| {
+                        let any_tab = (0..ws.tab_count()).any(|i| ws.is_tab_dragging(i));
+                        (any_tab, ws.is_any_group_dragging())
+                    });
+                    async_assert!(any_tab_dragging && !any_group_dragging)
+                }),
+        )
+}
+
+/// Dragging an ungrouped tab onto the center of another ungrouped tab in the
+/// vertical sidebar forms a new group containing both.
+pub fn test_drag_vertical_create_group_by_drag() -> Builder {
+    FeatureFlag::GroupedTabs.set_enabled(true);
+    FeatureFlag::DragTabsToWindows.set_enabled(true);
+    new_builder()
+        .with_step(wait_until_bootstrapped_single_pane_for_tab(0))
+        .with_step(
+            new_step_with_default_assertions("Open a second tab")
+                .with_keystrokes(&[cmd_or_ctrl_shift("t")]),
+        )
+        .with_step(wait_until_bootstrapped_single_pane_for_tab(1))
+        .with_step(enable_grouped_vertical_tabs(
+            VerticalTabsDisplayGranularity::Tabs,
+            VerticalTabsViewMode::Compact,
+        ))
+        .with_step(
+            new_step_with_default_assertions("Both tabs start ungrouped").add_named_assertion(
+                "ungrouped",
+                |app, window_id| {
+                    let workspace = workspace_view(app, window_id);
+                    let ungrouped = workspace.read(app, |ws, _ctx| {
+                        ws.tab_group_id_at(0).is_none() && ws.tab_group_id_at(1).is_none()
+                    });
+                    async_assert!(ungrouped)
+                },
+            ),
+        )
+        .with_step(
+            TestStep::new("Drag tab 0 onto the center of tab 1")
+                .with_action(|app, window_id, _| {
+                    let start = vertical_tab_row_bounds(app, window_id, 0).center();
+                    dispatch_mouse_event(
+                        app,
+                        window_id,
+                        Event::LeftMouseDown {
+                            position: start,
+                            modifiers: ModifiersState::default(),
+                            click_count: 1,
+                            is_first_mouse: false,
+                        },
+                    );
+                })
+                .with_action(|app, window_id, _| {
+                    // Small move to pass the drag threshold without leaving tab 0.
+                    let start = vertical_tab_row_bounds(app, window_id, 0).center();
+                    dispatch_mouse_event(
+                        app,
+                        window_id,
+                        Event::LeftMouseDragged {
+                            position: start + vec2f(0.0, 8.0),
+                            modifiers: ModifiersState::default(),
+                        },
+                    );
+                })
+                .with_action(|app, window_id, _| {
+                    // Park over tab 1's center band to arm grouping.
+                    let target = vertical_tab_row_bounds(app, window_id, 1).center();
+                    dispatch_mouse_event(
+                        app,
+                        window_id,
+                        Event::LeftMouseDragged {
+                            position: target,
+                            modifiers: ModifiersState::default(),
+                        },
+                    );
+                })
+                .with_action(|app, window_id, _| {
+                    let target = vertical_tab_row_bounds(app, window_id, 1).center();
+                    dispatch_mouse_event(
+                        app,
+                        window_id,
+                        Event::LeftMouseUp {
+                            position: target,
+                            modifiers: ModifiersState::default(),
+                        },
+                    );
+                })
+                .add_named_assertion("both tabs now share one group", |app, window_id| {
+                    let workspace = workspace_view(app, window_id);
+                    let grouped_together = workspace.read(app, |ws, _ctx| {
+                        match (ws.tab_group_id_at(0), ws.tab_group_id_at(1)) {
+                            (Some(a), Some(b)) => a == b,
+                            _ => false,
+                        }
+                    });
+                    async_assert!(grouped_together)
+                }),
+        )
 }
 
 pub fn test_reorder_tabs_with_drag() -> Builder {

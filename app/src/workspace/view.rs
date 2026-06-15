@@ -743,6 +743,16 @@ pub struct TabPaneGroupIdentifiers {
     pub terminal_ids: Vec<EntityId>,
 }
 
+/// Records a pending drag-to-group action while a tab is dragged over the center
+/// of another tab in the vertical sidebar. On drop, `dragged_index` is grouped
+/// with `target_index` (forming a new group if the target is ungrouped, or
+/// joining the target's existing group).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TabDragGroupTarget {
+    pub dragged_index: usize,
+    pub target_index: usize,
+}
+
 #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LocalToCloudHandoffIntent {
@@ -968,6 +978,11 @@ pub struct Workspace {
     /// Each entry is the `pane_group.id()` of the corresponding tab.
     tab_mru_order: Vec<EntityId>,
     pub(crate) hovered_tab_index: Option<TabBarHoverIndex>,
+    /// While a vertical-sidebar tab drag hovers over the center of another tab,
+    /// this records the would-be grouping so the target can be highlighted and
+    /// the group formed on drop. Cleared when the drag leaves the center band or
+    /// the drop completes.
+    pub(crate) tab_drag_group_target: Option<TabDragGroupTarget>,
     tab_bar_hover_state: MouseStateHandle,
     tab_fixed_width: Option<f32>,
     traffic_light_mouse_states: TrafficLightMouseStates,
@@ -3241,6 +3256,7 @@ impl Workspace {
             active_tab_index: 0,
             tab_mru_order: Vec::new(),
             hovered_tab_index: None,
+            tab_drag_group_target: None,
             tab_bar_hover_state: Default::default(),
             traffic_light_mouse_states: Default::default(),
             tab_groups: HashMap::new(),
@@ -4999,6 +5015,25 @@ impl Workspace {
 
     pub fn tab_count(&self) -> usize {
         self.tabs.len()
+    }
+
+    /// Returns the tab group the tab at `index` belongs to, if any.
+    pub fn tab_group_id_at(&self, index: usize) -> Option<TabGroupId> {
+        self.tabs.get(index).and_then(|tab| tab.group_id)
+    }
+
+    /// Returns whether the tab at `index` is currently being dragged.
+    pub fn is_tab_dragging(&self, index: usize) -> bool {
+        self.tabs
+            .get(index)
+            .is_some_and(|tab| tab.draggable_state.is_dragging())
+    }
+
+    /// Returns whether any tab group block is currently being dragged.
+    pub fn is_any_group_dragging(&self) -> bool {
+        self.tab_groups
+            .values()
+            .any(|group| group.draggable_state.is_dragging())
     }
 
     #[cfg(test)]
@@ -23514,6 +23549,8 @@ impl TypedActionView for Workspace {
                 self.clear_tab_multi_selection(ctx);
                 // If we are renaming a tab, finish the rename before dragging.
                 self.finish_tab_rename(ctx);
+                // Start from a clean slate for drag-to-group targeting.
+                self.tab_drag_group_target = None;
                 self.current_workspace_state.is_tab_being_dragged = true;
             }
             StartGroupDrag(_group_id) => {
@@ -23917,6 +23954,14 @@ impl TypedActionView for Workspace {
             } => self.on_tab_drag(*tab_index, *tab_position, ctx),
             DropTab => {
                 let is_cross_window = CrossWindowTabDrag::as_ref(ctx).is_active();
+                // Drag-to-create-group: if the drag ended while parked over the
+                // center of another tab, form/join a group with it.
+                if let Some(group_target) = self.tab_drag_group_target.take() {
+                    if !is_cross_window {
+                        self.group_dragged_tab_with_target(group_target, ctx);
+                    }
+                    ctx.notify();
+                }
                 let handed_off_tab_index =
                     CrossWindowTabDrag::as_ref(ctx)
                         .handed_off_target()
@@ -27140,6 +27185,30 @@ impl Workspace {
             }
         }
 
+        // Drag-to-create-group: when the dragged tab's center hovers over the
+        // center band of a different ungrouped tab in the vertical sidebar, mark
+        // that tab as a group target (it is highlighted in the panel) and
+        // suppress reordering so the drag "parks" on it. Releasing here forms a
+        // new group (handled in the `DropTab` action). Hovering the top/bottom
+        // margins instead falls through to normal reordering.
+        if groups_enabled && use_vertical_tabs {
+            if let Some(target_index) = self.group_drop_target_at(current_index, position, ctx) {
+                let new_target = TabDragGroupTarget {
+                    dragged_index: current_index,
+                    target_index,
+                };
+                if self.tab_drag_group_target != Some(new_target) {
+                    self.tab_drag_group_target = Some(new_target);
+                    ctx.notify();
+                }
+                return;
+            }
+            if self.tab_drag_group_target.is_some() {
+                self.tab_drag_group_target = None;
+                ctx.notify();
+            }
+        }
+
         let new_index = if use_vertical_tabs {
             self.calculate_updated_tab_index_vertical(current_index, position, ctx)
         } else {
@@ -27354,6 +27423,67 @@ impl Workspace {
                 min + EDGE_MARGIN <= cursor && cursor <= max - EDGE_MARGIN
             })
         })
+    }
+
+    /// Returns the index of a tab whose center band the dragged tab is hovering
+    /// over, when that tab is a valid drag-to-group target: a different,
+    /// ungrouped tab. Dropping onto an *already grouped* tab is handled by the
+    /// expanded-group membership reassignment, so only ungrouped targets (which
+    /// would form a brand-new group) are reported here. The top/bottom margins
+    /// of each tab are excluded so they keep reordering responsive.
+    fn group_drop_target_at(
+        &self,
+        dragged_index: usize,
+        position: RectF,
+        ctx: &mut ViewContext<Self>,
+    ) -> Option<usize> {
+        // Fraction of a tab's height (centered) that arms grouping.
+        const CENTER_BAND_FRACTION: f32 = 0.34;
+        let midpoint_y = (position.min_y() + position.max_y()) / 2.;
+        self.tabs.iter().enumerate().find_map(|(index, tab)| {
+            if index == dragged_index || tab.group_id.is_some() {
+                return None;
+            }
+            let rect = ctx.element_position_by_id(tab_position_id(index))?;
+            let margin = rect.height() * (1. - CENTER_BAND_FRACTION) / 2.;
+            (midpoint_y >= rect.min_y() + margin && midpoint_y <= rect.max_y() - margin)
+                .then_some(index)
+        })
+    }
+
+    /// Groups the dragged tab with its drop target, creating a new group when
+    /// the target is ungrouped (and opening its rename editor) or joining the
+    /// target's existing group otherwise.
+    fn group_dragged_tab_with_target(
+        &mut self,
+        target: TabDragGroupTarget,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if !FeatureFlag::GroupedTabs.is_enabled() {
+            return;
+        }
+        let TabDragGroupTarget {
+            dragged_index,
+            target_index,
+        } = target;
+        if dragged_index == target_index
+            || dragged_index >= self.tabs.len()
+            || target_index >= self.tabs.len()
+        {
+            return;
+        }
+        let group_id = match self.tabs[target_index].group_id {
+            Some(existing) => existing,
+            None => {
+                let group = TabGroup::new();
+                let id = group.id;
+                self.tab_groups.insert(id, group);
+                self.tabs[target_index].group_id = Some(id);
+                ctx.dispatch_typed_action_deferred(WorkspaceAction::RenameTabGroup(id));
+                id
+            }
+        };
+        self.move_tab_to_group(dragged_index, group_id, ctx);
     }
 
     /// Returns the drag comparison rect for `neighbor_index`.
