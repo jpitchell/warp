@@ -36,6 +36,9 @@ pub enum ActiveDialog {
     ConfirmDiscardAll,
     ConfirmRemoveWorktree {
         path: PathBuf,
+        /// The worktree has modified/untracked files, so removal needs
+        /// `--force`. Drives the warning wording and the "Force Remove" button.
+        force: bool,
     },
 }
 
@@ -168,9 +171,10 @@ impl DialogState {
                 self.danger_button
                     .update(ctx, |b, ctx| b.set_label("Discard", ctx));
             }
-            ActiveDialog::ConfirmRemoveWorktree { .. } => {
+            ActiveDialog::ConfirmRemoveWorktree { force, .. } => {
+                let label = if *force { "Force Remove" } else { "Remove" };
                 self.danger_button
-                    .update(ctx, |b, ctx| b.set_label("Remove", ctx));
+                    .update(ctx, |b, ctx| b.set_label(label, ctx));
             }
         }
 
@@ -298,12 +302,21 @@ impl DialogState {
             )
             .with_bottom_row_child(cancel)
             .with_bottom_row_child(ChildView::new(&self.danger_button).finish()),
-            ActiveDialog::ConfirmRemoveWorktree { path } => Dialog::new(
-                "Remove worktree?".to_string(),
-                Some(format!(
-                    "The worktree at '{}' will be removed.",
-                    path.display()
-                )),
+            ActiveDialog::ConfirmRemoveWorktree { path, force } => Dialog::new(
+                if *force {
+                    "Force remove worktree?".to_string()
+                } else {
+                    "Remove worktree?".to_string()
+                },
+                Some(if *force {
+                    format!(
+                        "The worktree at '{}' has modified or untracked files. \
+                         Force removing it will permanently discard them. This cannot be undone.",
+                        path.display()
+                    )
+                } else {
+                    format!("The worktree at '{}' will be removed.", path.display())
+                }),
                 UiComponentStyles {
                     width: Some(DIALOG_WIDTH),
                     ..dialog_styles(appearance)

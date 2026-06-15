@@ -445,6 +445,15 @@ impl SourceControlView {
                 // reset the spinner came back empty.
                 self.show_error_toast(err.clone(), ctx);
             }
+            SourceControlEvent::WorktreeRemovePrepared { path, dirty } => {
+                self.open_dialog(
+                    ActiveDialog::ConfirmRemoveWorktree {
+                        path: path.clone(),
+                        force: *dirty,
+                    },
+                    ctx,
+                );
+            }
             SourceControlEvent::OperationFinished { kind, result } => {
                 match result {
                     Err(err) => self.show_error_toast(err.clone(), ctx),
@@ -987,9 +996,9 @@ impl SourceControlView {
                 self.run_on_model(ctx, |m, ctx| m.discard(tracked, vec![], ctx));
                 self.dialog.close(ctx);
             }
-            ActiveDialog::ConfirmRemoveWorktree { path } => {
+            ActiveDialog::ConfirmRemoveWorktree { path, force } => {
                 Self::send_action_telemetry(SourceControlPanelAction::WorktreeRemove, ctx);
-                self.run_on_model(ctx, |m, ctx| m.worktree_remove(path, false, ctx));
+                self.run_on_model(ctx, |m, ctx| m.worktree_remove(path, force, ctx));
                 self.dialog.close(ctx);
             }
         }
@@ -1182,10 +1191,11 @@ impl SourceControlView {
                 ctx.emit(Event::OpenWorktreeInNewTab { path: path.clone() });
             }
             Action::RequestRemoveWorktree(path) => {
-                self.open_dialog(
-                    ActiveDialog::ConfirmRemoveWorktree { path: path.clone() },
-                    ctx,
-                );
+                // Check whether the worktree is dirty before opening the dialog;
+                // the resulting `WorktreeRemovePrepared` event opens it with the
+                // wording / button that match (force vs. plain remove).
+                let path = path.clone();
+                self.run_on_model(ctx, move |m, ctx| m.prepare_worktree_remove(path, ctx));
             }
             Action::SelectWorktreeBranch(branch) => {
                 self.dialog.selected_worktree_branch = Some(branch.clone());
