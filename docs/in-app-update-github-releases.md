@@ -82,6 +82,20 @@ though the dev build only reads `dev`.
 }
 ```
 
+## Publishing via CI
+
+`.github/workflows/fork_release_dev_autoupdate.yml` automates the above on
+GitHub-hosted macOS runners (no secrets beyond `GITHUB_TOKEN`). Run it from the
+Actions tab (leave `version` blank to auto-generate a correctly-formatted one) or
+push a `v0.*.dev_*` tag. It builds the `dev` channel with `--features autoupdate`
+for both architectures, generates `channel_versions.json`, and publishes a
+GitHub Release (marked **latest**) carrying `WarpDev.dmg`, `WarpDev-arm64.dmg`,
+and the manifest. The .dmg is ad-hoc signed and not notarized.
+
+> Linux and Windows release jobs are not included yet — only the AppImage,
+> macOS, and Windows-installer download paths are supported by the updater, but
+> only macOS is wired into CI here.
+
 ## Local testing without a server
 
 Point the updater at a local manifest file to exercise the flow end-to-end:
