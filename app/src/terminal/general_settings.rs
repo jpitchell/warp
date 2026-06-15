@@ -107,6 +107,13 @@ define_settings_group!(GeneralSettings, settings: [
         sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
         private: true,
     },
+    claude_cwd_hook_prompt_dismissed: ClaudeCwdHookPromptDismissed {
+        type: bool,
+        default: false,
+        supported_platforms: SupportedPlatforms::ALL,
+        sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
+        private: true,
+    },
     user_default_shell_unsupported_banner_state: UserDefaultShellUnsupportedBannerState {
         type: BannerState,
         default: BannerState::default(),
