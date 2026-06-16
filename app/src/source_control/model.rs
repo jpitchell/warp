@@ -804,3 +804,7 @@ impl RepositorySubscriber for SourceControlRepositorySubscriber {
         })
     }
 }
+
+#[cfg(all(test, feature = "local_fs"))]
+#[path = "model_tests.rs"]
+mod tests;
