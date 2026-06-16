@@ -131,7 +131,10 @@ jobs:
     name: Build macOS (${{ matrix.dmg_name_suffix }})
     needs: check
     if: ${{ needs.check.outputs.should_release == 'true' }}
-    runs-on: macos-14
+    # macos-26 ships Xcode 26, which prepare_environment pins via setup-xcode
+    # (xcode-version: '26'). macos-14 only carries Xcode 15.x–16.x, so that pin
+    # fails there with "Could not find Xcode version that satisfied version spec".
+    runs-on: macos-26
     timeout-minutes: 90
     strategy:
       fail-fast: false
