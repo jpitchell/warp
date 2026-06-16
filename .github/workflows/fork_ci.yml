@@ -101,6 +101,18 @@ jobs:
             /opt/hostedtoolcache/CodeQL /usr/local/share/boost
           df -h /
 
+      # Compiling all of warp's test targets peaks above the ubuntu-latest
+      # runner's ~16 GB of RAM, which got the "Compile tests" step OOM-killed
+      # (exit 143, "runner received a shutdown signal"). Add swap so the heavy
+      # link/codegen phase has headroom.
+      - name: Add swap space
+        run: |
+          sudo fallocate -l 12G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - uses: ./.github/actions/prepare_environment
