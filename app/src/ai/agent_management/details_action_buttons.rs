@@ -26,6 +26,9 @@ pub struct ActionButtonsConfig {
     pub view_details_item_id: Option<AgentConversationEntryId>,
     /// Conversation link URL (either to the transcript or live session) for copy link button.
     pub copy_link_url: Option<String>,
+    /// Overrides the open button's visible label (e.g. "Resume" for external
+    /// sessions). When `None` the button is icon-only with an "Open conversation" tooltip.
+    pub open_button_label: Option<&'static str>,
 }
 
 impl ActionButtonsConfig {
@@ -58,6 +61,7 @@ impl ActionButtonsConfig {
             fork_conversation_id: None,
             view_details_item_id: None,
             copy_link_url,
+            open_button_label: None,
         }
     }
 
@@ -75,6 +79,24 @@ impl ActionButtonsConfig {
             fork_conversation_id: Some(conversation_id),
             view_details_item_id: None,
             copy_link_url,
+            open_button_label: None,
+        }
+    }
+
+    /// Create config for an external Claude Code / Codex session. These have no
+    /// local conversation id, so only a "Resume" button (and optional copy link)
+    /// are shown.
+    pub fn for_external_session(
+        open_action: Option<WorkspaceAction>,
+        copy_link_url: Option<String>,
+    ) -> Self {
+        Self {
+            open_action,
+            cancel_task_id: None,
+            fork_conversation_id: None,
+            view_details_item_id: None,
+            copy_link_url,
+            open_button_label: Some("Resume"),
         }
     }
 }
@@ -169,6 +191,18 @@ impl ConversationActionButtonsRow {
     /// Set the config and rerender.
     pub fn set_config(&mut self, config: ActionButtonsConfig, ctx: &mut ViewContext<Self>) {
         self.config = config;
+
+        // The open button is icon-only by default ("Open conversation" tooltip), but
+        // external sessions surface a labeled "Resume" button for a clearer affordance.
+        let (label, tooltip) = match self.config.open_button_label {
+            Some(label) => (label, label),
+            None => ("", "Open conversation"),
+        };
+        self.open_button.update(ctx, |button, ctx| {
+            button.set_label(label, ctx);
+            button.set_tooltip(Some(tooltip), ctx);
+        });
+
         ctx.notify();
     }
 

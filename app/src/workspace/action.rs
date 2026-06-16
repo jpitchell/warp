@@ -20,9 +20,11 @@ use super::view::{OnboardingTutorial, WorkspaceBanner};
 use crate::ai::agent::api::ServerConversationToken;
 use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::agent::AIAgentExchangeId;
+use crate::ai::agent_conversations_model::AgentConversationEntryId;
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::blocklist::PendingAttachment;
 use crate::ai::document::ai_document_model::{AIDocumentId, AIDocumentVersion};
+use crate::ai::external_sessions::{ExternalAgentKind, ExternalSessionId};
 use crate::auth::auth_manager::LoginGatedFeature;
 use crate::drive::items::WarpDriveItemId;
 use crate::drive::CloudObjectTypeAndId;
@@ -519,6 +521,19 @@ pub enum WorkspaceAction {
     FocusTerminalViewInWorkspace {
         terminal_view_id: EntityId,
     },
+    /// Resume an externally-run Claude Code / Codex session by opening a new
+    /// terminal pane in its working directory and running the CLI's native
+    /// resume command.
+    ResumeExternalAgentSession {
+        id: ExternalSessionId,
+        cwd: PathBuf,
+    },
+    /// Start a fresh externally-run Claude Code / Codex session by opening a new
+    /// terminal pane (inheriting the active session's working directory) and
+    /// running the CLI.
+    StartExternalAgentSession {
+        kind: ExternalAgentKind,
+    },
     /// Focus a specific pane by its locator (pane_group_id and pane_id).
     FocusPane(PaneViewLocator),
     /// Start a new AI conversation in a terminal view. This sets the pending query state
@@ -706,6 +721,12 @@ pub enum WorkspaceAction {
         select_first: bool,
     },
     ToggleAgentManagementView,
+    /// Open the agent management view focused on a specific conversation entry,
+    /// showing its details/transcript preview (used to preview external sessions
+    /// before resuming).
+    OpenAgentManagementViewForEntry {
+        item_id: AgentConversationEntryId,
+    },
     ViewAgentRunsForEnvironment {
         environment_id: String,
     },
@@ -907,6 +928,8 @@ impl WorkspaceAction {
             | RunWorkflow { .. }
             | OpenFileInNewTab { .. }
             | RestoreOrNavigateToConversation { .. }
+            | ResumeExternalAgentSession { .. }
+            | StartExternalAgentSession { .. }
             | NewCodeFile
             | ForkAIConversation { .. }
             | SummarizeAIConversation { .. }
@@ -1078,6 +1101,7 @@ impl WorkspaceAction {
             | ToggleSourceControlPanel
             | ToggleNotificationMailbox { .. }
             | ToggleAgentManagementView
+            | OpenAgentManagementViewForEntry { .. }
             | ViewAgentRunsForEnvironment { .. }
             | ToggleAIDocumentPane { .. }
             | HideAIDocumentPanes

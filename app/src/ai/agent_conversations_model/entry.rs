@@ -16,6 +16,7 @@ use crate::ai::ambient_agents::{AgentSource, AmbientAgentTask, AmbientAgentTaskI
 use crate::ai::artifacts::Artifact;
 use crate::ai::blocklist::history_model::{AIConversationMetadata, BlocklistAIHistoryModel};
 use crate::ai::conversation_navigation::ConversationNavigationData;
+use crate::ai::external_sessions::{ExternalSessionId, ExternalSessionIndexEntry};
 use crate::auth::{AuthStateProvider, UserUid};
 use crate::util::time_format::human_readable_precise_duration;
 use crate::workspace::RestoreConversationLayout;
@@ -31,6 +32,8 @@ const SESSION_EXPIRATION_TIME: chrono::Duration = chrono::Duration::weeks(1);
 pub enum AgentConversationEntryId {
     AmbientRun(AmbientAgentTaskId),
     Conversation(AIConversationId),
+    /// An externally-run Claude Code / Codex session discovered on disk.
+    ExternalSession(ExternalSessionId),
 }
 
 impl AgentConversationEntryId {
@@ -38,6 +41,7 @@ impl AgentConversationEntryId {
         match self {
             AgentConversationEntryId::AmbientRun(id) => format!("task_{id}"),
             AgentConversationEntryId::Conversation(id) => format!("conv_{id}"),
+            AgentConversationEntryId::ExternalSession(id) => id.as_key(),
         }
     }
 }
@@ -143,6 +147,8 @@ pub enum AgentConversationProvenance {
     LocalInteractive,
     AmbientRun,
     CloudSyncedConversation,
+    /// A Claude Code / Codex session run outside Warp, read from its on-disk transcript.
+    ExternalLocalSession,
 }
 
 /// Availability flags for the source data that contributed to an entry.
@@ -540,6 +546,64 @@ pub(super) fn entry_for_task(
             can_delete: false,
             can_fork_locally: local_conversation_id.is_some(),
             can_cancel: status.is_cancellable(),
+        },
+    }
+}
+
+/// Build an entry for an externally-run Claude Code / Codex session read from disk.
+///
+/// These rows are resume-and-preview only: there is no Warp-side conversation to
+/// fork, delete, or share. `is_active` is `true` when a running pane or fresh
+/// transcript indicates the session is live (see `ExternalSessionsModel`).
+pub(super) fn entry_for_external_session(
+    index_entry: &ExternalSessionIndexEntry,
+    is_active: bool,
+) -> AgentConversationEntry {
+    let status = if is_active {
+        AgentRunDisplayStatus::ConversationInProgress
+    } else {
+        AgentRunDisplayStatus::ConversationSucceeded
+    };
+
+    AgentConversationEntry {
+        id: AgentConversationEntryId::ExternalSession(index_entry.id),
+        identity: AgentConversationIdentity {
+            local_conversation_id: None,
+            ambient_agent_task_id: None,
+            server_conversation_token: None,
+            session_id: None,
+        },
+        provenance: AgentConversationProvenance::ExternalLocalSession,
+        display: AgentConversationDisplayData {
+            title: index_entry.title.clone(),
+            initial_query: None,
+            created_at: index_entry.created_at,
+            last_updated: index_entry.last_modified,
+            status,
+            creator: AgentConversationPrincipal::default(),
+            executor: None,
+            request_usage: None,
+            run_time: None,
+            session_status: None,
+            source: None,
+            working_directory: Some(index_entry.cwd.to_string_lossy().into_owned()),
+            environment_id: None,
+            harness: Some(index_entry.id.agent.harness()),
+            artifacts: Vec::new(),
+        },
+        backing: AgentConversationBackingData {
+            has_loaded_conversation: false,
+            has_local_persisted_data: true,
+            has_cloud_data: false,
+            has_ambient_run: false,
+        },
+        capabilities: AgentConversationCapabilities {
+            can_open: true,
+            can_copy_link: false,
+            can_share: false,
+            can_delete: false,
+            can_fork_locally: false,
+            can_cancel: false,
         },
     }
 }

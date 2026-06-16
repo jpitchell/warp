@@ -1,6 +1,6 @@
 //! A reusable side panel component for displaying conversation metadata.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -16,11 +16,12 @@ use warpui::clipboard::ClipboardContent;
 use warpui::elements::new_scrollable::{NewScrollable, SingleAxisConfig};
 use warpui::elements::{
     resizable_state_handle, Border, ChildView, ClippedScrollStateHandle, ConstrainedBox, Container,
-    CornerRadius, CrossAxisAlignment, DragBarSide, Empty, Expanded, Flex, MainAxisAlignment,
-    MainAxisSize, MouseStateHandle, ParentElement, Radius, Resizable, ResizableStateHandle,
-    SelectableArea, SelectionHandle, Shrinkable, Text, Wrap,
+    CornerRadius, CrossAxisAlignment, DragBarSide, Empty, Expanded, Flex, Highlight,
+    HighlightedRange, Hoverable, MainAxisAlignment, MainAxisSize, MouseStateHandle, ParentElement,
+    Radius, Resizable, ResizableStateHandle, SelectableArea, SelectionHandle, Shrinkable, Text,
+    Wrap,
 };
-use warpui::fonts::{Properties, Weight};
+use warpui::fonts::{Properties, Style as FontStyle, Weight};
 use warpui::keymap::FixedBinding;
 use warpui::platform::Cursor;
 use warpui::ui_components::components::UiComponent;
@@ -45,8 +46,16 @@ use crate::ai::ambient_agents::{cancel_task_with_toast, AmbientAgentTaskId};
 use crate::ai::artifacts::{Artifact, ArtifactButtonsRow, ArtifactButtonsRowEvent};
 use crate::ai::blocklist::BlocklistAIHistoryModel;
 use crate::ai::cloud_environments::{AmbientAgentEnvironment, CloudAmbientAgentEnvironment};
+use crate::ai::external_sessions::transcript::{
+    NormalizedTranscript, TranscriptBlock, TranscriptRole,
+};
+use crate::ai::external_sessions::ExternalSessionId;
 use crate::ai::harness_availability::HarnessAvailabilityModel;
 use crate::ai::harness_display;
+use crate::ai::transcript_syntax::{
+    classify_prose_line, highlight_spans, parse_inline_markdown, split_segments, InlineStyle,
+    ProseLine, SyntaxToken, TranscriptSegment,
+};
 use crate::appearance::Appearance;
 use crate::auth::UserUid;
 use crate::cloud_object::CloudObjectLookup as _;
@@ -620,6 +629,8 @@ pub enum ConversationDetailsPanelAction {
     #[cfg(not(target_family = "wasm"))]
     ContinueLocally,
     OpenInOz,
+    /// Toggle the expanded/collapsed state of the tool result at this render index.
+    ToggleToolResult(usize),
 }
 
 pub fn init(app: &mut AppContext) {
@@ -653,6 +664,19 @@ pub struct ConversationDetailsPanel {
     /// Selection state for cmd+C copy.
     selection_handle: SelectionHandle,
     selected_text: Arc<RwLock<Option<String>>>,
+    /// Read-only transcript preview for an externally-run Claude Code / Codex
+    /// session, lazily loaded off-thread when such an entry is selected.
+    external_transcript: Option<Arc<NormalizedTranscript>>,
+    external_transcript_loading: bool,
+    /// Which external session the transcript state is for, so a late-arriving
+    /// async load for a previously-selected entry is ignored.
+    external_transcript_id: Option<ExternalSessionId>,
+    /// Tool-result blocks currently expanded in the transcript preview, keyed by
+    /// their position in render order. Collapsed by default.
+    expanded_tool_results: HashSet<usize>,
+    /// Per-tool-result hover state, sized to the loaded transcript so each
+    /// expandable header keeps a stable hover affordance across renders.
+    tool_result_mouse_states: Vec<MouseStateHandle>,
 }
 
 impl ConversationDetailsPanel {
@@ -707,6 +731,11 @@ impl ConversationDetailsPanel {
             copy_feedback_times: HashMap::new(),
             selection_handle: SelectionHandle::default(),
             selected_text: Default::default(),
+            external_transcript: None,
+            external_transcript_loading: false,
+            external_transcript_id: None,
+            expanded_tool_results: HashSet::new(),
+            tool_result_mouse_states: Vec::new(),
         }
     }
 
@@ -718,6 +747,60 @@ impl ConversationDetailsPanel {
         self.set_artifacts(&data, ctx);
         self.set_action_buttons(&data, ctx);
         self.data = data;
+        // Switching entries clears any external transcript; callers re-populate it
+        // for external sessions after this call.
+        self.external_transcript = None;
+        self.external_transcript_loading = false;
+        self.external_transcript_id = None;
+        self.reset_tool_result_state();
+        ctx.notify();
+    }
+
+    /// Clears per-transcript tool-result expansion and hover state. Tool results
+    /// always start collapsed when a different entry or transcript is shown.
+    fn reset_tool_result_state(&mut self) {
+        self.expanded_tool_results.clear();
+        self.tool_result_mouse_states.clear();
+    }
+
+    /// Show a loading state while `id`'s transcript is parsed off-thread.
+    pub fn set_external_transcript_loading(
+        &mut self,
+        id: ExternalSessionId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.external_transcript = None;
+        self.external_transcript_loading = true;
+        self.external_transcript_id = Some(id);
+        self.reset_tool_result_state();
+        ctx.notify();
+    }
+
+    /// Populate the read-only transcript preview for `id`. Ignored if the panel has
+    /// since moved to a different entry.
+    pub fn set_external_transcript(
+        &mut self,
+        id: ExternalSessionId,
+        transcript: Arc<NormalizedTranscript>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if self.external_transcript_id != Some(id) {
+            return;
+        }
+        // Allocate a stable hover state per tool-result block so the expandable
+        // headers don't lose their hover affordance between renders.
+        let tool_result_count = transcript
+            .messages
+            .iter()
+            .flat_map(|message| &message.blocks)
+            .filter(|block| matches!(block, TranscriptBlock::ToolResult { .. }))
+            .count();
+        self.expanded_tool_results.clear();
+        self.tool_result_mouse_states = (0..tool_result_count)
+            .map(|_| MouseStateHandle::default())
+            .collect();
+        self.external_transcript = Some(transcript);
+        self.external_transcript_loading = false;
         ctx.notify();
     }
 
@@ -830,6 +913,20 @@ impl ConversationDetailsPanel {
             .show_open_button
             .then(|| data.open_action.clone())
             .flatten();
+
+        // External Claude Code / Codex sessions have no local conversation id, so
+        // they don't fit the task/conversation button configs. Surface a dedicated
+        // "Resume" button keyed off the resume action.
+        if matches!(
+            open_action,
+            Some(WorkspaceAction::ResumeExternalAgentSession { .. })
+        ) {
+            return Some(ActionButtonsConfig::for_external_session(
+                open_action,
+                data.copy_link_url.clone(),
+            ));
+        }
+
         match &data.mode {
             PanelMode::Task {
                 task_id,
@@ -1686,6 +1783,430 @@ impl ConversationDetailsPanel {
             .finish()
     }
 
+    /// Maximum transcript messages rendered in the preview, to bound work for very
+    /// long sessions. A truncation note is shown when exceeded.
+    const MAX_TRANSCRIPT_MESSAGES: usize = 200;
+
+    /// Read-only preview of an external session's transcript. Returns `None` when
+    /// there's nothing to show (not an external session / not yet requested).
+    fn render_transcript_section(&self, appearance: &Appearance) -> Option<Box<dyn Element>> {
+        let theme = appearance.theme();
+        let ui_font_size = appearance.ui_font_size();
+
+        if self.external_transcript_loading {
+            return Some(self.render_simple_field("Transcript", "Loading…", appearance));
+        }
+
+        let transcript = self.external_transcript.as_ref()?;
+
+        let mut column = Flex::column()
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_main_axis_size(MainAxisSize::Min);
+
+        column.add_child(
+            Container::new(
+                Text::new(
+                    "Transcript".to_string(),
+                    appearance.ui_font_family(),
+                    ui_font_size,
+                )
+                .with_color(blended_colors::text_sub(theme, theme.surface_1()))
+                .finish(),
+            )
+            .with_margin_bottom(SECTION_HEADER_GAP)
+            .finish(),
+        );
+
+        // Running index assigned to each tool result in render order; used as the
+        // key for per-result expand/collapse and hover state.
+        let mut tool_result_index = 0usize;
+        for message in transcript
+            .messages
+            .iter()
+            .take(Self::MAX_TRANSCRIPT_MESSAGES)
+        {
+            // Tool turns (a tool call or its result) carry no role label — the
+            // `⚙ name` / `↳ tool result` rows are self-describing, and a "You"
+            // or "Tool" header would only add noise.
+            let role_label = match message.role {
+                TranscriptRole::User => Some("You"),
+                TranscriptRole::Assistant => Some("Agent"),
+                TranscriptRole::System => Some("System"),
+                TranscriptRole::Tool => None,
+            };
+            if let Some(rendered) = self.render_transcript_message(
+                role_label,
+                &message.blocks,
+                &mut tool_result_index,
+                appearance,
+            ) {
+                column.add_child(
+                    Container::new(rendered)
+                        .with_margin_bottom(FIELD_SPACING)
+                        .finish(),
+                );
+            }
+        }
+
+        if transcript.messages.len() > Self::MAX_TRANSCRIPT_MESSAGES {
+            column.add_child(
+                Text::new(
+                    format!(
+                        "Transcript truncated — showing the first {} messages.",
+                        Self::MAX_TRANSCRIPT_MESSAGES
+                    ),
+                    appearance.ui_font_family(),
+                    ui_font_size,
+                )
+                .with_color(blended_colors::text_sub(theme, theme.surface_1()))
+                .finish(),
+            );
+        }
+
+        Some(column.finish())
+    }
+
+    /// Renders one transcript message: a role label above the message body.
+    /// Text blocks render as markdown (prose + fenced code), and tool calls /
+    /// results surface a concise summary. Returns `None` if nothing is visible.
+    fn render_transcript_message(
+        &self,
+        label: Option<&str>,
+        blocks: &[TranscriptBlock],
+        tool_result_index: &mut usize,
+        appearance: &Appearance,
+    ) -> Option<Box<dyn Element>> {
+        let theme = appearance.theme();
+        let ui_font_size = appearance.ui_font_size();
+
+        let mut body_column = Flex::column()
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_main_axis_size(MainAxisSize::Min);
+        let mut has_content = false;
+
+        for block in blocks {
+            match block {
+                TranscriptBlock::Text(text) => {
+                    for segment in split_segments(text) {
+                        match segment {
+                            TranscriptSegment::Prose(prose) => {
+                                if let Some(rendered) = self.render_prose(&prose, appearance) {
+                                    body_column.add_child(rendered);
+                                    has_content = true;
+                                }
+                            }
+                            TranscriptSegment::Code { code, .. } => {
+                                body_column.add_child(self.render_code_block(&code, appearance));
+                                has_content = true;
+                            }
+                        }
+                    }
+                }
+                TranscriptBlock::ToolUse { name, .. } => {
+                    body_column.add_child(self.render_tool_use(name, block, appearance));
+                    has_content = true;
+                }
+                TranscriptBlock::ToolResult { content } => {
+                    let index = *tool_result_index;
+                    *tool_result_index += 1;
+                    body_column.add_child(self.render_tool_result(content, index, appearance));
+                    has_content = true;
+                }
+            }
+        }
+
+        if !has_content {
+            return None;
+        }
+
+        let mut message_column =
+            Flex::column().with_cross_axis_alignment(CrossAxisAlignment::Stretch);
+        if let Some(label) = label {
+            let label_text =
+                Text::new(label.to_string(), appearance.ui_font_family(), ui_font_size)
+                    .with_color(blended_colors::text_sub(theme, theme.surface_1()))
+                    .finish();
+            message_column.add_child(
+                Container::new(label_text)
+                    .with_margin_bottom(LABEL_VALUE_GAP)
+                    .finish(),
+            );
+        }
+
+        Some(message_column.with_child(body_column.finish()).finish())
+    }
+
+    /// Renders a run of prose with basic markdown: per-line headings and bullet
+    /// lists, plus inline bold / italic / code emphasis. Returns `None` if the
+    /// prose is blank.
+    fn render_prose(&self, prose: &str, appearance: &Appearance) -> Option<Box<dyn Element>> {
+        if prose.trim().is_empty() {
+            return None;
+        }
+
+        let theme = appearance.theme();
+        let ui_font_size = appearance.ui_font_size();
+        let foreground: ColorU = theme.foreground().into();
+        let code_color = theme.ansi_fg_cyan();
+
+        let mut column = Flex::column()
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_main_axis_size(MainAxisSize::Min);
+
+        for line in prose.trim_matches('\n').lines() {
+            // Preserve paragraph breaks as a small vertical gap.
+            if line.trim().is_empty() {
+                column.add_child(
+                    ConstrainedBox::new(Empty::new().finish())
+                        .with_height(ui_font_size * 0.5)
+                        .finish(),
+                );
+                continue;
+            }
+
+            let prose_line = classify_prose_line(line);
+            let is_heading = matches!(prose_line, ProseLine::Heading { .. });
+            let display = match &prose_line {
+                ProseLine::Bullet { text } => format!("•  {text}"),
+                other => other.text().to_string(),
+            };
+
+            // Parse inline emphasis over the full display line (bullet glyph
+            // included), so the returned text and ranges already line up.
+            let (rendered, inline) = parse_inline_markdown(&display);
+
+            let mut highlights: Vec<HighlightedRange> = inline
+                .into_iter()
+                .map(|(range, style)| {
+                    let highlight = match style {
+                        InlineStyle::Bold => Highlight::new()
+                            .with_properties(Properties::default().weight(Weight::Bold)),
+                        InlineStyle::Italic => Highlight::new()
+                            .with_properties(Properties::default().style(FontStyle::Italic)),
+                        InlineStyle::Code => Highlight::new().with_foreground_color(code_color),
+                    };
+                    HighlightedRange {
+                        highlight,
+                        highlight_indices: range.collect(),
+                    }
+                })
+                .collect();
+
+            // Headings render bold across the whole line.
+            if is_heading {
+                let len = rendered.chars().count();
+                highlights.push(HighlightedRange {
+                    highlight: Highlight::new()
+                        .with_properties(Properties::default().weight(Weight::Bold)),
+                    highlight_indices: (0..len).collect(),
+                });
+            }
+
+            column.add_child(
+                Text::new(rendered, appearance.ui_font_family(), ui_font_size)
+                    .with_color(foreground)
+                    .with_highlights(highlights)
+                    .with_selectable(true)
+                    .finish(),
+            );
+        }
+
+        Some(column.finish())
+    }
+
+    /// Renders a tool call as `⚙ Name` with a concise, monospaced summary of its
+    /// primary argument (the command, file path, etc.) when one is available.
+    fn render_tool_use(
+        &self,
+        name: &str,
+        block: &TranscriptBlock,
+        appearance: &Appearance,
+    ) -> Box<dyn Element> {
+        let theme = appearance.theme();
+        let ui_font_size = appearance.ui_font_size();
+        let foreground: ColorU = theme.foreground().into();
+
+        let mut row = Flex::row()
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_child(
+                Text::new(
+                    format!("⚙ {name}"),
+                    appearance.ui_font_family(),
+                    ui_font_size,
+                )
+                .with_color(foreground)
+                .finish(),
+            );
+
+        if let Some(detail) = block.tool_use_detail() {
+            row.add_child(
+                Container::new(
+                    Text::new(
+                        detail,
+                        appearance.monospace_font_family(),
+                        appearance.monospace_font_size(),
+                    )
+                    .with_color(coloru_with_opacity(foreground, 70))
+                    .with_selectable(true)
+                    .finish(),
+                )
+                .with_margin_left(6.)
+                .finish(),
+            );
+        }
+
+        row.finish()
+    }
+
+    /// Renders a tool result as a collapsible `↳ tool result` row. Collapsed by
+    /// default; clicking the header reveals the full (capped) output in a
+    /// monospaced panel. `index` keys the per-result expand and hover state.
+    fn render_tool_result(
+        &self,
+        content: &str,
+        index: usize,
+        appearance: &Appearance,
+    ) -> Box<dyn Element> {
+        let theme = appearance.theme();
+        let ui_font_size = appearance.ui_font_size();
+        let label_color = blended_colors::text_sub(theme, theme.surface_1());
+
+        let is_expanded = self.expanded_tool_results.contains(&index);
+        let is_empty = content.trim().is_empty();
+        let mouse_state = self
+            .tool_result_mouse_states
+            .get(index)
+            .cloned()
+            .unwrap_or_default();
+
+        let chevron_icon = if is_expanded {
+            Icon::ChevronDown
+        } else {
+            Icon::ChevronRight
+        };
+        let font_family = appearance.ui_font_family();
+
+        let header = Hoverable::new(mouse_state, move |_state| {
+            let chevron =
+                ConstrainedBox::new(chevron_icon.to_warpui_icon(label_color.into()).finish())
+                    .with_width(ui_font_size)
+                    .with_height(ui_font_size)
+                    .finish();
+            let label = Text::new("tool result".to_string(), font_family, ui_font_size)
+                .with_color(label_color)
+                .finish();
+            Flex::row()
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_main_axis_size(MainAxisSize::Min)
+                .with_child(Container::new(chevron).with_margin_right(4.).finish())
+                .with_child(label)
+                .finish()
+        });
+
+        // An empty result has nothing to expand, so it isn't made clickable.
+        let header: Box<dyn Element> = if is_empty {
+            header.finish()
+        } else {
+            header
+                .on_click(move |ctx, _, _| {
+                    ctx.dispatch_typed_action(ConversationDetailsPanelAction::ToggleToolResult(
+                        index,
+                    ));
+                })
+                .with_cursor(Cursor::PointingHand)
+                .finish()
+        };
+
+        let mut column = Flex::column()
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_child(header);
+
+        if is_expanded && !is_empty {
+            column.add_child(self.render_tool_result_body(content, appearance));
+        }
+
+        column.finish()
+    }
+
+    /// Max characters of a tool result shown when expanded, to keep very large
+    /// outputs (e.g. a file read) from bogging down layout.
+    const TOOL_RESULT_MAX_CHARS: usize = 8000;
+
+    /// Renders the expanded body of a tool result in a dimmed monospaced panel,
+    /// truncating pathologically large outputs.
+    fn render_tool_result_body(&self, content: &str, appearance: &Appearance) -> Box<dyn Element> {
+        let theme = appearance.theme();
+        let foreground: ColorU = theme.foreground().into();
+
+        let trimmed = content.trim_end_matches('\n');
+        let char_count = trimmed.chars().count();
+        let display = if char_count > Self::TOOL_RESULT_MAX_CHARS {
+            let shown: String = trimmed.chars().take(Self::TOOL_RESULT_MAX_CHARS).collect();
+            let remaining = char_count - Self::TOOL_RESULT_MAX_CHARS;
+            format!("{shown}\n… ({remaining} more characters)")
+        } else {
+            trimmed.to_string()
+        };
+
+        let body_text = Text::new(
+            display,
+            appearance.monospace_font_family(),
+            appearance.monospace_font_size(),
+        )
+        .with_color(coloru_with_opacity(foreground, 80))
+        .with_selectable(true)
+        .finish();
+
+        Container::new(body_text)
+            .with_uniform_padding(8.)
+            .with_background(coloru_with_opacity(blended_colors::neutral_2(theme), 60))
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+            .with_margin_top(LABEL_VALUE_GAP)
+            .with_margin_bottom(LABEL_VALUE_GAP)
+            .finish()
+    }
+
+    /// Renders a fenced code block in a monospaced panel with basic, heuristic
+    /// syntax highlighting (keywords, strings, comments, numbers).
+    fn render_code_block(&self, code: &str, appearance: &Appearance) -> Box<dyn Element> {
+        let theme = appearance.theme();
+        let code = code.trim_matches('\n').to_string();
+
+        let comment_color = coloru_with_opacity(theme.foreground().into(), 55);
+        let highlights = highlight_spans(&code).into_iter().map(|(range, token)| {
+            let color = match token {
+                SyntaxToken::Keyword => theme.ansi_fg_magenta(),
+                SyntaxToken::StringLiteral => theme.ansi_fg_green(),
+                SyntaxToken::Number => theme.ansi_fg_cyan(),
+                SyntaxToken::Comment => comment_color,
+            };
+            HighlightedRange {
+                highlight: Highlight::new().with_foreground_color(color),
+                highlight_indices: range.collect(),
+            }
+        });
+
+        let code_text = Text::new(
+            code,
+            appearance.monospace_font_family(),
+            appearance.monospace_font_size(),
+        )
+        .with_color(theme.foreground().into())
+        .with_highlights(highlights)
+        .with_selectable(true)
+        .finish();
+
+        Container::new(code_text)
+            .with_uniform_padding(8.)
+            .with_background(coloru_with_opacity(blended_colors::neutral_2(theme), 60))
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+            .with_margin_top(LABEL_VALUE_GAP)
+            .with_margin_bottom(LABEL_VALUE_GAP)
+            .finish()
+    }
+
     fn render_simple_field(
         &self,
         label: &str,
@@ -2064,6 +2585,26 @@ impl View for ConversationDetailsPanel {
             );
         }
 
+        // Read-only transcript preview for externally-run sessions.
+        if let Some(transcript_section) = self.render_transcript_section(appearance) {
+            content.add_child(
+                Container::new(
+                    Container::new(Empty::new().finish())
+                        .with_border(
+                            Border::top(1.).with_border_fill(blended_colors::neutral_2(theme)),
+                        )
+                        .finish(),
+                )
+                .with_margin_bottom(FIELD_SPACING)
+                .finish(),
+            );
+            content.add_child(
+                Container::new(transcript_section)
+                    .with_margin_bottom(FIELD_SPACING)
+                    .finish(),
+            );
+        }
+
         let scrollable_content = NewScrollable::vertical(
             SingleAxisConfig::Clipped {
                 handle: self.scroll_state.clone(),
@@ -2247,6 +2788,12 @@ impl TypedActionView for ConversationDetailsPanel {
                 if let Some(url) = Self::oz_run_url(&self.data) {
                     ctx.open_url(&url);
                 }
+            }
+            ConversationDetailsPanelAction::ToggleToolResult(index) => {
+                if !self.expanded_tool_results.remove(index) {
+                    self.expanded_tool_results.insert(*index);
+                }
+                ctx.notify();
             }
         }
     }

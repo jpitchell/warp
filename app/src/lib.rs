@@ -1841,6 +1841,9 @@ pub(crate) fn initialize_app(
     ctx.add_singleton_model(|_| CLIAgentSessionsModel::new());
     // ActiveAgentViewsModel is used to track active agent conversations and notify listeners when they change.
     ctx.add_singleton_model(|_| ActiveAgentViewsModel::new());
+    // ExternalSessionsModel scans ~/.claude and ~/.codex for externally-run sessions
+    // surfaced in the Agent Conversations pane.
+    ctx.add_singleton_model(ai::external_sessions::ExternalSessionsModel::new);
     ctx.add_singleton_model(AgentNotificationsModel::new);
     ctx.add_singleton_model(BlocklistAIPermissions::new);
     ctx.add_singleton_model(ai::blocklist::orchestration_events::OrchestrationEventService::new);
