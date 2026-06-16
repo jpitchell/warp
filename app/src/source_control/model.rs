@@ -29,7 +29,7 @@ use {
     std::collections::HashMap,
     std::time::Duration,
     warp_util::git::run_git_command,
-    warpui::r#async::SpawnedFutureHandle,
+    warpui::r#async::{SpawnedFutureHandle, Timer},
     warpui::{ModelHandle, WeakModelHandle},
 };
 
@@ -186,6 +186,8 @@ pub struct SourceControlModel {
     history_limit: usize,
 
     refresh_abort_handle: Option<SpawnedFutureHandle>,
+    /// Drives the once-a-minute background fetch (see [`PERIODIC_FETCH_INTERVAL`]).
+    periodic_fetch_handle: Option<SpawnedFutureHandle>,
 }
 
 #[cfg(feature = "local_fs")]
@@ -215,6 +217,12 @@ const DEFAULT_HISTORY_LIMIT: usize = 50;
 #[cfg(feature = "local_fs")]
 const REFRESH_DEBOUNCE: Duration = Duration::from_millis(500);
 
+/// How often the panel fetches from the remote in the background so ahead/behind
+/// counts stay current without the user clicking Refresh. A fetch is a network
+/// call, so this is deliberately coarse.
+#[cfg(feature = "local_fs")]
+const PERIODIC_FETCH_INTERVAL: Duration = Duration::from_secs(60);
+
 #[cfg(feature = "local_fs")]
 impl SourceControlModel {
     fn new(
@@ -237,9 +245,11 @@ impl SourceControlModel {
             worktree_details_enabled: false,
             history_limit: DEFAULT_HISTORY_LIMIT,
             refresh_abort_handle: None,
+            periodic_fetch_handle: None,
         };
 
         model.refresh(ctx);
+        model.schedule_periodic_fetch(ctx);
 
         // Start watching for filesystem changes (worktree-aware in the watcher).
         let (repository_update_tx, repository_update_rx) = async_channel::unbounded();
@@ -361,6 +371,18 @@ impl SourceControlModel {
     /// Aborts any in-flight refresh and spawns a fresh load of status, stashes,
     /// and worktrees; history is loaded only while its section is expanded.
     pub fn refresh(&mut self, ctx: &mut ModelContext<Self>) {
+        self.refresh_inner(false, ctx);
+    }
+
+    /// Like [`refresh`](Self::refresh) but first fetches from the remote so the
+    /// ahead/behind counts and remote-tracking branches reflect what's on the
+    /// server. Reserved for explicit user actions (the Refresh button), since a
+    /// fetch is a network call we don't want on automatic refreshes.
+    pub fn refresh_with_fetch(&mut self, ctx: &mut ModelContext<Self>) {
+        self.refresh_inner(true, ctx);
+    }
+
+    fn refresh_inner(&mut self, fetch: bool, ctx: &mut ModelContext<Self>) {
         if let Some(handle) = self.refresh_abort_handle.take() {
             handle.abort();
         }
@@ -368,19 +390,70 @@ impl SourceControlModel {
         let history_enabled = self.history_enabled;
         let history_limit = self.history_limit;
         self.refresh_abort_handle = Some(ctx.spawn(
-            async move { Self::load(repo_path, history_enabled, history_limit).await },
+            async move { Self::load(repo_path, fetch, history_enabled, history_limit).await },
             |me, result, ctx| {
                 me.apply_refresh(result, ctx);
             },
         ));
     }
 
+    /// Arms a one-shot timer that — if the repo has a remote — fetches and
+    /// reloads, then re-arms itself. A self-rescheduling loop that lives as long
+    /// as the model (the callback only runs while the entity is alive, so it
+    /// stops on drop). Because a `SourceControlModel` exists only for a real repo
+    /// root, this runs exactly when we're in a git repo.
+    ///
+    /// The remote is re-checked every tick rather than once at startup, so a repo
+    /// that gains a remote later (`git remote add …`) begins fetching on the next
+    /// tick without any extra wiring. The check is a local `git remote` read, so
+    /// remote-less repos cost nothing but that read each minute.
+    fn schedule_periodic_fetch(&mut self, ctx: &mut ModelContext<Self>) {
+        if let Some(handle) = self.periodic_fetch_handle.take() {
+            handle.abort();
+        }
+        let repo_path = self.repo_path.clone();
+        self.periodic_fetch_handle = Some(ctx.spawn(
+            async move {
+                Timer::after(PERIODIC_FETCH_INTERVAL).await;
+                Self::repo_has_remote(&repo_path).await
+            },
+            |me, has_remote, ctx| {
+                if has_remote {
+                    me.refresh_with_fetch(ctx);
+                }
+                me.schedule_periodic_fetch(ctx);
+            },
+        ));
+    }
+
+    /// Returns whether the repo has at least one configured remote. A local
+    /// `git remote` read (no network); failures are treated as "no remote".
+    async fn repo_has_remote(repo_path: &Path) -> bool {
+        match run_git_command(repo_path, &["remote"]).await {
+            Ok(output) => !output.trim().is_empty(),
+            Err(err) => {
+                log::warn!("SourceControlModel: git remote failed: {err}");
+                false
+            }
+        }
+    }
+
     async fn load(
         repo_path: PathBuf,
+        fetch: bool,
         history_enabled: bool,
         history_limit: usize,
     ) -> RefreshResult {
         let mut result = RefreshResult::default();
+
+        // Fetch first so the subsequent `git status` reflects updated
+        // remote-tracking refs. A fetch failure (no remote, offline) is logged
+        // but not surfaced: the local refresh below still succeeds.
+        if fetch {
+            if let Err(err) = run_git_command(&repo_path, &["fetch"]).await {
+                log::warn!("SourceControlModel: git fetch failed: {err}");
+            }
+        }
 
         match run_git_command(&repo_path, &["status", "--porcelain=v2", "--branch", "-z"]).await {
             Ok(output) => result.status = Some(parse_porcelain_v2(&output)),

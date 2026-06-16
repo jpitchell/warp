@@ -1065,7 +1065,7 @@ impl SourceControlView {
             Action::Refresh => {
                 if let Some(model) = self.model().cloned() {
                     self.refresh_in_flight = true;
-                    model.update(ctx, |m, ctx| m.refresh(ctx));
+                    model.update(ctx, |m, ctx| m.refresh_with_fetch(ctx));
                     self.refresh_controls(ctx);
                     ctx.notify();
                 }
