@@ -11,11 +11,15 @@
 # certs required), packages a .dmg per architecture, and attaches them to a
 # GitHub Release on this fork.
 #
-# Trigger: push a version tag, e.g.
-#     git tag v0.1.0 && git push origin v0.1.0
-# You can also run it manually from the Actions tab (workflow_dispatch); manual
-# runs build the artifacts and upload them to the workflow run but do not create
-# a published GitHub Release unless a tag is provided.
+# Triggers:
+#   * schedule (nightly): the `check` job looks for new commits on the default
+#     branch since the most recent release and only cuts a new release (under an
+#     auto-generated date-based tag) when there is something new to ship.
+#   * push of a version tag, e.g. `git tag v0.1.0 && git push origin v0.1.0`
+#     (always releases under that tag).
+#   * manual run from the Actions tab (workflow_dispatch); always builds, and
+#     publishes a release under the optional `tag` input (or an auto-generated
+#     date-based tag if left blank).
 #
 # NOTE: the produced .dmg is ad-hoc signed and NOT notarized. On first launch,
 # macOS Gatekeeper will require right-click > Open (or
@@ -24,19 +28,29 @@
 name: Fork Release (macOS)
 
 on:
+  schedule:
+    # Nightly at 08:00 UTC. The `check` job below short-circuits the (costly)
+    # macOS build unless the default branch has new commits since the last
+    # release.
+    - cron: "0 8 * * *"
   push:
     tags:
       - "v*"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Optional version tag to stamp into the build (e.g. v0.1.0). Leave blank to build without a published release."
+        description: "Optional version tag to stamp into the build (e.g. v0.1.0). Leave blank to auto-generate a date-based tag."
         required: false
         type: string
 
 # Needed for softprops/action-gh-release to create releases and upload assets.
 permissions:
   contents: write
+
+# Avoid overlapping runs (a long build spilling into the next night's run).
+concurrency:
+  group: fork-release-macos
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -45,8 +59,78 @@ env:
   CHANNEL: oss
 
 jobs:
+  # Cheap gating job: decides whether to cut a release and under what tag.
+  #   * tag push / manual dispatch -> always release.
+  #   * schedule (nightly) -> release only if there are new commits since the
+  #     most recent release.
+  check:
+    name: Check for new changes
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.decide.outputs.should_release }}
+      tag: ${{ steps.decide.outputs.tag }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          # Full history + tags so we can compare HEAD against the last release.
+          fetch-depth: 0
+
+      - name: Decide whether to release and compute tag
+        id: decide
+        # INPUT_TAG is passed via env (not interpolated into the script body) to
+        # avoid shell injection from the workflow_dispatch input.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --quiet || true
+
+          # Resolve the tag to publish under.
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            tag="${GITHUB_REF_NAME}"
+          elif [[ -n "${INPUT_TAG}" ]]; then
+            tag="${INPUT_TAG}"
+          else
+            # Date-based tag in the format script/update_plist understands
+            # (vN.YYYY.MM.DD.HH.MM.<channel>_NN), so a real version string is
+            # stamped into the app's Info.plist instead of the placeholder.
+            tag="v0.$(date -u +%Y.%m.%d.%H.%M).oss_00"
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+          # Anything other than the nightly schedule always releases.
+          if [[ "${GITHUB_EVENT_NAME}" != "schedule" ]]; then
+            echo "Triggered by '${GITHUB_EVENT_NAME}'; will release as ${tag}."
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Scheduled run: only release if there are new commits since the most
+          # recent release. `gh release list` includes prereleases (the REST
+          # releases/latest endpoint does not, and our releases are prereleases).
+          last_tag="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || true)"
+          if [[ -z "${last_tag}" ]]; then
+            echo "No existing releases; cutting the first release as ${tag}."
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          last_sha="$(git rev-list -n1 "${last_tag}" 2>/dev/null || true)"
+          head_sha="$(git rev-parse HEAD)"
+          if [[ -n "${last_sha}" && "${last_sha}" == "${head_sha}" ]]; then
+            echo "No new commits since ${last_tag} (${head_sha}); skipping release."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "New commits since ${last_tag} (${last_sha:-unknown} -> ${head_sha}); cutting release ${tag}."
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          fi
+        shell: bash
+
   build_macos:
     name: Build macOS (${{ matrix.dmg_name_suffix }})
+    needs: check
+    if: ${{ needs.check.outputs.should_release == 'true' }}
     runs-on: macos-14
     timeout-minutes: 90
     strategy:
@@ -85,27 +169,6 @@ jobs:
       - name: Install create-dmg
         run: brew install create-dmg
 
-      - name: Resolve release tag
-        id: tag
-        # INPUT_TAG is passed via env (not interpolated into the script body) to
-        # avoid shell injection from the workflow_dispatch input.
-        env:
-          INPUT_TAG: ${{ inputs.tag }}
-        run: |
-          # On a tag push, GITHUB_REF_NAME is the tag (e.g. v0.1.0). For manual
-          # runs, use the optional `tag` input if provided.
-          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-          elif [[ -n "$INPUT_TAG" ]]; then
-            echo "value=$INPUT_TAG" >> "$GITHUB_OUTPUT"
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=v0.0.0-dev" >> "$GITHUB_OUTPUT"
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-          fi
-        shell: bash
-
       - name: Build ${{ matrix.arch }} bundle (oss channel, self-signed)
         id: bundle
         run: |
@@ -116,7 +179,7 @@ jobs:
             --dmg-name-suffix "${{ matrix.dmg_name_suffix }}"
         shell: bash
         env:
-          GIT_RELEASE_TAG: ${{ steps.tag.outputs.value }}
+          GIT_RELEASE_TAG: ${{ needs.check.outputs.tag }}
 
       - name: Upload DMG as workflow artifact
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
@@ -125,11 +188,10 @@ jobs:
           path: ${{ steps.bundle.outputs.dmg_path }}
 
       - name: Attach DMG to GitHub Release
-        if: ${{ steps.tag.outputs.publish == 'true' }}
         uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2.2.2
         with:
-          tag_name: ${{ steps.tag.outputs.value }}
-          name: Warp (OSS) ${{ steps.tag.outputs.value }}
+          tag_name: ${{ needs.check.outputs.tag }}
+          name: Warp (OSS) ${{ needs.check.outputs.tag }}
           body: |
             Unsigned, un-notarized open-source (`oss` channel) build of Warp for macOS.
 
