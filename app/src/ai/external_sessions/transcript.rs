@@ -48,7 +48,7 @@ pub fn load_transcript(id: ExternalSessionId, path: &Path) -> NormalizedTranscri
     };
     let cwd = values
         .iter()
-        .find_map(|v| claude_or_codex_cwd(v))
+        .find_map(claude_or_codex_cwd)
         .unwrap_or_default();
     let title = messages
         .iter()
