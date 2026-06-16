@@ -143,15 +143,9 @@ fn claude_tool_result_user_turn_is_labeled_as_tool() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join(format!("{CLAUDE_UUID}.jsonl"));
     let jsonl = [
-        format!(
-            r#"{{"type":"user","cwd":"/p","message":{{"role":"user","content":"Do the thing"}}}}"#
-        ),
-        format!(
-            r#"{{"type":"assistant","cwd":"/p","message":{{"role":"assistant","content":[{{"type":"tool_use","name":"Edit","input":{{"file_path":"/p/a.rs"}}}}]}}}}"#
-        ),
-        format!(
-            r#"{{"type":"user","cwd":"/p","message":{{"role":"user","content":[{{"type":"tool_result","content":"done"}}]}}}}"#
-        ),
+        r#"{"type":"user","cwd":"/p","message":{"role":"user","content":"Do the thing"}}"#,
+        r#"{"type":"assistant","cwd":"/p","message":{"role":"assistant","content":[{"type":"tool_use","name":"Edit","input":{"file_path":"/p/a.rs"}}]}}"#,
+        r#"{"type":"user","cwd":"/p","message":{"role":"user","content":[{"type":"tool_result","content":"done"}]}}"#,
     ]
     .join("\n");
     write(&path, &jsonl);
