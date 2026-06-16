@@ -135,6 +135,11 @@ pub(super) fn read_head_values(path: &Path, max_lines: usize) -> Vec<Value> {
 
 /// Read every non-blank line of a JSONL file as a [`Value`], skipping malformed
 /// lines. Used by the lazy transcript tier (preview) where the full body is needed.
+/// Upper bound on JSONL records parsed from a single session file. Long-running
+/// external sessions can produce very large transcripts; this bounds worst-case
+/// memory when one is selected for preview (rendering is capped separately).
+const MAX_TRANSCRIPT_LINES: usize = 50_000;
+
 pub(super) fn read_all_values(path: &Path) -> Vec<Value> {
     let Ok(file) = std::fs::File::open(path) else {
         return Vec::new();
@@ -149,6 +154,13 @@ pub(super) fn read_all_values(path: &Path) -> Vec<Value> {
         }
         if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
             values.push(value);
+        }
+        if values.len() >= MAX_TRANSCRIPT_LINES {
+            log::debug!(
+                "external_sessions: transcript {} exceeds {MAX_TRANSCRIPT_LINES} records; truncating preview",
+                path.display()
+            );
+            break;
         }
     }
     values

@@ -12257,6 +12257,17 @@ impl Workspace {
             terminal_view.update(ctx, |terminal, ctx| {
                 terminal.set_pending_command_queue(vec![command], ctx);
             });
+        } else {
+            // The new tab should always have an active terminal; if it somehow
+            // doesn't, the command would vanish silently — surface it instead.
+            log::warn!(
+                "external_sessions: new tab has no active terminal view; dropping '{cli}' command"
+            );
+            let message = format!("Couldn't open a terminal to {action_description}.");
+            self.toast_stack.update(ctx, |toast_stack, ctx| {
+                toast_stack
+                    .add_ephemeral_toast(DismissibleToast::new(message, ToastFlavor::Error), ctx);
+            });
         }
     }
 

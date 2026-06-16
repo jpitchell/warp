@@ -1278,9 +1278,6 @@ impl AgentConversationsModel {
             .collect()
     }
 
-    /// IDs of external sessions Warp considers currently live. Populated in a later
-    /// phase by correlating against running CLI-agent panes; empty for now so all
-    /// external sessions display as past.
     /// External sessions Warp considers currently live: those with a running
     /// CLI-agent pane (matched by session uuid), plus any whose transcript was
     /// modified within the freshness window (covers live runs in panes Warp
