@@ -38,6 +38,27 @@ impl ExternalAgentKind {
             ExternalAgentKind::Codex => Harness::Codex,
         }
     }
+
+    /// The executable name to look up on `PATH` and invoke.
+    pub fn cli_name(self) -> &'static str {
+        match self {
+            ExternalAgentKind::ClaudeCode => "claude",
+            ExternalAgentKind::Codex => "codex",
+        }
+    }
+
+    /// Command line that resumes an existing session by its UUID.
+    pub fn resume_command(self, uuid: Uuid) -> String {
+        match self {
+            ExternalAgentKind::ClaudeCode => format!("claude --resume {uuid}"),
+            ExternalAgentKind::Codex => format!("codex resume {uuid}"),
+        }
+    }
+
+    /// Command line that starts a fresh session (no resume).
+    pub fn new_session_command(self) -> String {
+        self.cli_name().to_string()
+    }
 }
 
 /// Stable identity for an external session: the agent plus its on-disk session UUID

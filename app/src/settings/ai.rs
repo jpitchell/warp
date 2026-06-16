@@ -331,6 +331,66 @@ impl DefaultSessionMode {
     }
 }
 
+/// Which agent the "New conversation" split button starts on a primary click.
+/// The dropdown always offers all options; this is just the default action.
+#[derive(
+    Default,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    PartialEq,
+    Copy,
+    Clone,
+    EnumIter,
+    schemars::JsonSchema,
+    settings_value::SettingsValue,
+)]
+#[schemars(
+    description = "Default agent for the New Conversation button.",
+    rename_all = "snake_case"
+)]
+pub enum DefaultNewConversationAgent {
+    /// Start a new conversation with Warp's own agent (default).
+    #[default]
+    WarpAgent,
+    /// Start a fresh external Claude Code session.
+    ClaudeCode,
+    /// Start a fresh external Codex session.
+    Codex,
+}
+
+settings::macros::implement_setting_for_enum!(
+    DefaultNewConversationAgent,
+    AISettings,
+    SupportedPlatforms::ALL,
+    SyncToCloud::Globally(RespectUserSyncSetting::Yes),
+    private: false,
+    toml_path: "agents.conversations.default_new_conversation_agent",
+    description: "Which agent the New Conversation button starts by default.",
+);
+
+impl DefaultNewConversationAgent {
+    /// Display name for the settings dropdown and split-button menu.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            DefaultNewConversationAgent::WarpAgent => "Warp Agent",
+            DefaultNewConversationAgent::ClaudeCode => "Claude Code",
+            DefaultNewConversationAgent::Codex => "Codex",
+        }
+    }
+
+    /// Label for the "start a new conversation" affordance — the split-button
+    /// title and its matching dropdown item — so both render sites share one
+    /// source of truth for the wording.
+    pub fn new_conversation_label(&self) -> &'static str {
+        match self {
+            DefaultNewConversationAgent::WarpAgent => "New conversation",
+            DefaultNewConversationAgent::ClaudeCode => "New Claude Code session",
+            DefaultNewConversationAgent::Codex => "New Codex session",
+        }
+    }
+}
+
 /// Controls how agent thinking/reasoning traces are displayed after streaming.
 #[derive(
     Default,
@@ -1371,6 +1431,11 @@ define_settings_group!(AISettings, settings: [
     // effective value, which is gated on AI availability.
     default_session_mode_internal: DefaultSessionMode,
 
+    // The raw stored default agent for the "New conversation" split button. Use
+    // `default_new_conversation_agent()` for the effective value, which falls back to
+    // WarpAgent when external agent sessions are unavailable.
+    default_new_conversation_agent_internal: DefaultNewConversationAgent,
+
     // The file path of the tab config used when default_session_mode_internal is TabConfig.
     // Only read when mode is TabConfig; ignored for all other modes.
     // Machine-local (tab config paths vary per machine), so never synced to cloud.
@@ -1589,6 +1654,23 @@ impl AISettings {
                     mode
                 } else {
                     DefaultSessionMode::Terminal
+                }
+            }
+        }
+    }
+
+    /// Effective default agent for the "New conversation" button. Falls back to
+    /// `WarpAgent` when external agent sessions are disabled, so a stale stored
+    /// value doesn't point the button at an unavailable agent.
+    pub fn default_new_conversation_agent(&self) -> DefaultNewConversationAgent {
+        let agent = *self.default_new_conversation_agent_internal.value();
+        match agent {
+            DefaultNewConversationAgent::WarpAgent => agent,
+            DefaultNewConversationAgent::ClaudeCode | DefaultNewConversationAgent::Codex => {
+                if FeatureFlag::ExternalAgentSessionsInConversations.is_enabled() {
+                    agent
+                } else {
+                    DefaultNewConversationAgent::WarpAgent
                 }
             }
         }

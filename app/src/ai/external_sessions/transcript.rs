@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use super::index::{read_all_values, ExternalAgentKind, ExternalSessionId};
+use crate::util::truncation::truncate_from_end;
 
 /// A read-only, harness-agnostic transcript produced from a Claude or Codex session file.
 #[derive(Clone, Debug, PartialEq)]
@@ -37,6 +38,59 @@ pub enum TranscriptBlock {
     Text(String),
     ToolUse { name: String, input: String },
     ToolResult { content: String },
+}
+
+/// Argument keys, in priority order, that best summarize a tool call. The first
+/// one present in the input is shown next to the tool name in the preview.
+const TOOL_DETAIL_KEYS: &[&str] = &[
+    "command",
+    "file_path",
+    "path",
+    "notebook_path",
+    "file",
+    "pattern",
+    "query",
+    "url",
+    "description",
+    "prompt",
+];
+
+/// Max characters shown for a tool-call detail or result snippet in the preview.
+const TOOL_DETAIL_MAX_CHARS: usize = 160;
+
+impl TranscriptBlock {
+    /// For a [`TranscriptBlock::ToolUse`], extracts a concise one-line summary of
+    /// the call's most salient argument (the command, file path, pattern, etc.).
+    /// `input` is compact JSON; returns `None` when nothing useful can be shown.
+    pub fn tool_use_detail(&self) -> Option<String> {
+        let TranscriptBlock::ToolUse { input, .. } = self else {
+            return None;
+        };
+
+        let value: Value = serde_json::from_str(input).ok()?;
+        let object = value.as_object()?;
+
+        // Prefer a known, human-meaningful argument; otherwise fall back to the
+        // first scalar field so even unrecognized tools show something.
+        let detail = TOOL_DETAIL_KEYS
+            .iter()
+            .find_map(|key| object.get(*key).and_then(Value::as_str))
+            .or_else(|| {
+                object
+                    .values()
+                    .find_map(|v| v.as_str().filter(|s| !s.trim().is_empty()))
+            })?;
+
+        let detail = condense_detail(detail);
+        (!detail.is_empty()).then_some(detail)
+    }
+}
+
+/// Collapses whitespace to single spaces and truncates to a preview-friendly
+/// length, appending an ellipsis when shortened.
+fn condense_detail(text: &str) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    truncate_from_end(&collapsed, TOOL_DETAIL_MAX_CHARS)
 }
 
 /// Load and normalize a single session transcript from disk.
@@ -115,6 +169,18 @@ fn parse_claude(values: &[Value]) -> Vec<TranscriptMessage> {
         if blocks.is_empty() {
             continue;
         }
+        // Claude nests `tool_result` blocks inside a `user` turn, but that's the
+        // tool's output, not a human message — tag it as a tool turn (matching
+        // how Codex labels `function_call_output`) so it isn't shown as "You".
+        let role = if role == TranscriptRole::User
+            && blocks
+                .iter()
+                .all(|block| matches!(block, TranscriptBlock::ToolResult { .. }))
+        {
+            TranscriptRole::Tool
+        } else {
+            role
+        };
         messages.push(TranscriptMessage {
             role,
             timestamp: parse_timestamp(value),

@@ -12168,6 +12168,15 @@ impl Workspace {
         });
     }
 
+    /// The local working directory of the active session, if any. Remote working
+    /// directories return `None` (we can't launch a local CLI agent into them).
+    fn active_terminal_working_directory(&self, ctx: &ViewContext<Self>) -> Option<PathBuf> {
+        match ActiveSession::as_ref(ctx).working_directory(ctx.window_id()) {
+            Some(LocalOrRemotePath::Local(path)) => Some(path.clone()),
+            _ => None,
+        }
+    }
+
     /// Resume an externally-run Claude Code / Codex session: open a new terminal
     /// pane in the session's working directory and run the CLI's native resume
     /// command. If the CLI isn't installed, surface a toast and leave the row in
@@ -12178,17 +12187,50 @@ impl Workspace {
         cwd: PathBuf,
         ctx: &mut ViewContext<Self>,
     ) {
+        self.launch_external_agent_in_terminal(
+            id.agent,
+            id.agent.resume_command(id.uuid),
+            Some(cwd),
+            "resume this session",
+            ctx,
+        );
+    }
+
+    /// Start a fresh externally-run Claude Code / Codex session in a new terminal
+    /// pane. Inherits the active terminal's working directory when there is one.
+    fn start_external_agent_session(
+        &mut self,
+        kind: ExternalAgentKind,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let cwd = self.active_terminal_working_directory(ctx);
+        self.launch_external_agent_in_terminal(
+            kind,
+            kind.new_session_command(),
+            cwd,
+            "start a session",
+            ctx,
+        );
+    }
+
+    /// Shared plumbing for resuming or starting an external agent: resolve the CLI
+    /// (toasting if it's missing), open a new terminal tab in `cwd` (when it's a
+    /// real directory), and queue `command` to run there.
+    fn launch_external_agent_in_terminal(
+        &mut self,
+        kind: ExternalAgentKind,
+        command: String,
+        cwd: Option<PathBuf>,
+        action_description: &str,
+        ctx: &mut ViewContext<Self>,
+    ) {
         use crate::util::path::resolve_executable;
         use crate::view_components::ToastFlavor;
 
-        let (cli, command) = match id.agent {
-            ExternalAgentKind::ClaudeCode => ("claude", format!("claude --resume {}", id.uuid)),
-            ExternalAgentKind::Codex => ("codex", format!("codex resume {}", id.uuid)),
-        };
-
+        let cli = kind.cli_name();
         if resolve_executable(cli).is_none() {
             let message =
-                format!("'{cli}' CLI not found on your PATH — can't resume this session.");
+                format!("'{cli}' CLI not found on your PATH — can't {action_description}.");
             self.toast_stack.update(ctx, |toast_stack, ctx| {
                 toast_stack
                     .add_ephemeral_toast(DismissibleToast::new(message, ToastFlavor::Error), ctx);
@@ -12196,7 +12238,7 @@ impl Workspace {
             return;
         }
 
-        let initial_directory = Some(cwd).filter(|path| path.is_dir());
+        let initial_directory = cwd.filter(|path| path.is_dir());
         self.add_tab_with_pane_layout(
             PanesLayout::SingleTerminal(Box::new(NewTerminalOptions {
                 initial_directory,
@@ -23912,6 +23954,21 @@ impl TypedActionView for Workspace {
                     ctx.notify();
                 }
             }
+            OpenAgentManagementViewForEntry { item_id } => {
+                if AISettings::as_ref(ctx).is_any_ai_enabled(ctx)
+                    && FeatureFlag::AgentManagementView.is_enabled()
+                {
+                    self.set_is_agent_management_view_open(true, ctx);
+                    ctx.focus(&self.agent_management_view);
+
+                    let item_id = *item_id;
+                    self.agent_management_view.update(ctx, |view, ctx| {
+                        view.focus_entry(item_id, ctx);
+                    });
+
+                    ctx.notify();
+                }
+            }
             ClosePanel => {
                 if self.left_panel_view.is_self_or_child_focused(ctx) {
                     self.close_left_panel(ctx);
@@ -24403,6 +24460,9 @@ impl TypedActionView for Workspace {
             }
             ResumeExternalAgentSession { id, cwd } => {
                 self.resume_external_agent_session(*id, cwd.clone(), ctx);
+            }
+            StartExternalAgentSession { kind } => {
+                self.start_external_agent_session(*kind, ctx);
             }
             FocusPane(locator) => {
                 self.focus_pane(*locator, ctx);

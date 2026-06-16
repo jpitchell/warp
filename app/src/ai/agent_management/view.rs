@@ -392,7 +392,12 @@ impl AgentManagementView {
 
     fn get_view_state(&self, app: &AppContext) -> ViewState {
         let model = AgentConversationsModel::as_ref(app);
-        let has_items = model.has_items();
+        // External Claude Code / Codex sessions are real history too, so treat them
+        // as data: otherwise a user whose only sessions are external lands on the
+        // Oz cloud-agent setup guide instead of their session list.
+        let has_external_sessions = FeatureFlag::ExternalAgentSessionsInConversations.is_enabled()
+            && !ExternalSessionsModel::as_ref(app).entries().is_empty();
+        let has_items = model.has_items() || has_external_sessions;
 
         // If loading with zero items, show skeleton cards
         // If loading with items, show list of interactive conversations (with loading indicator in header)
@@ -939,6 +944,19 @@ impl AgentManagementView {
         self.update_environment_dropdown(ctx);
         self.update_creator_dropdown(ctx);
         self.on_filter_changed(ctx);
+    }
+
+    /// Select a specific entry and populate the details panel with its preview.
+    /// Used when opening the management view to preview a conversation (e.g. an
+    /// external Claude Code / Codex session) before resuming it.
+    pub(crate) fn focus_entry(
+        &mut self,
+        item_id: ManagementCardItemId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.update_details_panel_for_item(&item_id, ctx);
+        self.selected_item_id = Some(item_id);
+        ctx.notify();
     }
 
     /// Sync all tasks from the management model, and update the ListState
@@ -1663,6 +1681,9 @@ impl AgentManagementView {
             .is_mouse_over_element();
         let action_buttons_is_empty = card_state.action_buttons_view.as_ref(app).is_empty();
 
+        // Highlight the card whose details/preview is currently open in the panel.
+        let is_selected = self.selected_item_id == Some(card_state.item_id);
+
         let card_hoverable = Hoverable::new(card_state.hover_state.clone(), move |mouse_state| {
             let mut card_content = Flex::column()
                 .with_spacing(CARD_ROW_SPACING)
@@ -1678,15 +1699,23 @@ impl AgentManagementView {
             // to prevent lots of flickering.
             let should_show_action_buttons = mouse_state.is_hovered() || action_buttons_mouse_over;
 
-            let card_background = if should_show_action_buttons {
+            let card_background = if is_selected || should_show_action_buttons {
                 internal_colors::fg_overlay_2(theme)
             } else {
                 internal_colors::fg_overlay_1(theme)
             };
 
+            // A selected card gets an accent border so it's clear which session's
+            // preview is showing in the details panel.
+            let border_color = if is_selected {
+                theme.accent()
+            } else {
+                internal_colors::fg_overlay_2(theme)
+            };
+
             let card = Container::new(card_content.finish())
                 .with_background(card_background)
-                .with_border(Border::all(1.).with_border_fill(internal_colors::fg_overlay_2(theme)))
+                .with_border(Border::all(1.).with_border_fill(border_color))
                 .with_uniform_padding(CARD_CONTENT_PADDING)
                 .with_corner_radius(CornerRadius::with_all(Radius::Pixels(CARD_BORDER_RADIUS)))
                 .with_margin_top(CARD_MARGIN_BOTTOM)
@@ -2383,6 +2412,14 @@ impl TypedActionView for AgentManagementView {
                 ctx.notify();
             }
             AgentManagementViewAction::OpenSession { item_id } => {
+                // External Claude Code / Codex sessions preview in the details panel
+                // (which has its own Resume button) rather than resuming on a single
+                // click, matching the preview-first behavior of the conversation list.
+                if matches!(item_id, ManagementCardItemId::ExternalSession(_)) {
+                    self.focus_entry(*item_id, ctx);
+                    return;
+                }
+
                 let Some(action) = AgentConversationsModel::resolve_open_action(
                     AgentConversationNavigationSubject::Entry(*item_id),
                     Some(RestoreConversationLayout::NewTab),

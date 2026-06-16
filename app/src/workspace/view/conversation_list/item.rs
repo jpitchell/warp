@@ -1,4 +1,5 @@
 use pathfinder_geometry::vector::vec2f;
+use warp_core::features::FeatureFlag;
 use warp_core::ui::color::coloru_with_opacity;
 use warp_core::ui::theme::color::internal_colors;
 use warp_util::path::user_friendly_path;
@@ -26,6 +27,7 @@ use crate::appearance::Appearance;
 use crate::drive::sharing::dialog::SharingDialog;
 use crate::editor::EditorView;
 use crate::menu::Menu;
+use crate::settings::AISettings;
 use crate::ui_components::agent_icon::agent_conversation_entry_icon_variant;
 use crate::ui_components::icon_with_status::render_icon_with_status;
 use crate::ui_components::icons::Icon;
@@ -110,6 +112,8 @@ pub struct StaticItemProps<'a> {
     pub is_selected: bool,
     pub index: usize,
     pub state: &'a ItemState,
+    pub new_conversation_menu: &'a ViewHandle<Menu<ConversationListViewAction>>,
+    pub menu_open: bool,
 }
 
 pub fn render_static_item(props: StaticItemProps<'_>, app: &AppContext) -> Box<dyn Element> {
@@ -117,9 +121,17 @@ pub fn render_static_item(props: StaticItemProps<'_>, app: &AppContext) -> Box<d
         is_selected,
         index,
         state,
+        new_conversation_menu,
+        menu_open,
     } = props;
     let appearance = Appearance::as_ref(app);
     let theme = appearance.theme();
+
+    // The label reflects the configured default agent, since a primary click
+    // starts that agent. The caret menu always offers all the options.
+    let title = AISettings::as_ref(app)
+        .default_new_conversation_agent()
+        .new_conversation_label();
 
     let icon_color = theme.main_text_color(theme.background());
     let icon = Container::new(
@@ -134,7 +146,7 @@ pub fn render_static_item(props: StaticItemProps<'_>, app: &AppContext) -> Box<d
     .finish();
 
     let title_text = Text::new_inline(
-        "New conversation",
+        title,
         appearance.ui_font_family(),
         appearance.ui_font_size() + 2.,
     )
@@ -157,11 +169,48 @@ pub fn render_static_item(props: StaticItemProps<'_>, app: &AppContext) -> Box<d
     })
     .with_cursor(Cursor::PointingHand)
     .on_click(|ctx, _, _| {
-        ctx.dispatch_typed_action(ConversationListViewAction::NewConversationInNewTab);
+        ctx.dispatch_typed_action(ConversationListViewAction::StartDefaultNewConversation);
     });
 
+    // The split-button caret (start a conversation with a specific agent) is only
+    // meaningful when external agent sessions are available; otherwise the static
+    // item stays a plain "New conversation" button.
+    let item_element: Box<dyn Element> = if FeatureFlag::ExternalAgentSessionsInConversations
+        .is_enabled()
+    {
+        let caret_style = UiComponentStyles::default()
+            .set_background(theme.surface_2().into())
+            .set_border_color(theme.surface_3().into());
+        let caret_button = icon_button_with_context_menu(
+            Icon::ChevronDown,
+            move |ctx, _, _| {
+                ctx.dispatch_typed_action(ConversationListViewAction::ToggleNewConversationMenu);
+            },
+            state.overflow_button_state.clone(),
+            new_conversation_menu,
+            menu_open,
+            MenuDirection::Right,
+            Some(Cursor::PointingHand),
+            Some(caret_style),
+            appearance,
+        );
+
+        Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_child(Shrinkable::new(1.0, hoverable.finish()).finish())
+            .with_child(
+                Container::new(caret_button.finish())
+                    .with_horizontal_padding(8.)
+                    .finish(),
+            )
+            .finish()
+    } else {
+        hoverable.finish()
+    };
+
     EventHandler::new(
-        ConstrainedBox::new(hoverable.finish())
+        ConstrainedBox::new(item_element)
             .with_min_height(STATIC_ITEM_MIN_HEIGHT)
             .finish(),
     )

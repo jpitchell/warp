@@ -33,6 +33,7 @@ use crate::ai::agent_conversations_model::{
 use crate::ai::agent_management::telemetry::{AgentManagementTelemetryEvent, OpenedFrom};
 use crate::ai::blocklist::history_model::BlocklistAIHistoryModel;
 use crate::ai::conversation_rename::rename_conversation;
+use crate::ai::external_sessions::ExternalAgentKind;
 use crate::appearance::Appearance;
 use crate::drive::sharing::dialog::SharingDialog;
 use crate::drive::sharing::ShareableObject;
@@ -42,6 +43,7 @@ use crate::editor::{
 };
 use crate::menu::{Event as MenuEvent, Menu, MenuItem, MenuItemFields};
 use crate::server::telemetry::SharingDialogSource;
+use crate::settings::{AISettings, DefaultNewConversationAgent};
 use crate::view_components::action_button::{ActionButton, ButtonSize, SecondaryTheme};
 use crate::view_components::DismissibleToast;
 use crate::workspace::global_actions::ForkedConversationDestination;
@@ -139,6 +141,15 @@ pub enum ConversationListViewAction {
     SetSelectedIndex(usize),
     ClearSelectedIndex,
     NewConversationInNewTab,
+    /// Start a new conversation with the user's configured default agent
+    /// (Warp Agent, Claude Code, or Codex) — the split button's primary action.
+    StartDefaultNewConversation,
+    /// Start a fresh external Claude Code / Codex session from the split menu.
+    StartExternalConversation {
+        kind: ExternalAgentKind,
+    },
+    /// Open/close the "New conversation" split-button dropdown menu.
+    ToggleNewConversationMenu,
     ToggleSection(ConversationSection),
     ToggleViewAll,
     ForkConversation {
@@ -170,6 +181,10 @@ pub struct ConversationListView {
     item_overflow_menu: ViewHandle<Menu<ConversationListViewAction>>,
     /// Tracks the overflow menu state (which item it's open for and where to position it).
     overflow_menu_state: Option<OverflowMenuState>,
+    /// Dropdown menu for the "New conversation" split button (Warp Agent / Claude Code / Codex).
+    new_conversation_menu: ViewHandle<Menu<ConversationListViewAction>>,
+    /// Whether the new-conversation split-button menu is currently open.
+    new_conversation_menu_open: bool,
     /// Sharing dialog for conversations.
     sharing_dialog: ViewHandle<SharingDialog>,
     rename_editor: ViewHandle<EditorView>,
@@ -296,6 +311,19 @@ impl ConversationListView {
             MenuEvent::ItemSelected | MenuEvent::ItemHovered => {}
         });
 
+        let new_conversation_menu = ctx.add_typed_action_view(|_| {
+            Menu::new()
+                .prevent_interaction_with_other_elements()
+                .with_width(200.)
+        });
+        ctx.subscribe_to_view(&new_conversation_menu, |me, _, event, ctx| match event {
+            MenuEvent::Close { .. } => {
+                me.new_conversation_menu_open = false;
+                ctx.notify();
+            }
+            MenuEvent::ItemSelected | MenuEvent::ItemHovered => {}
+        });
+
         let sharing_dialog = ctx.add_typed_action_view(|ctx| SharingDialog::new(None, ctx));
         ctx.subscribe_to_view(&sharing_dialog, move |me, _, _event, ctx| {
             // SharingDialogEvent::Close is the only event currently
@@ -311,6 +339,8 @@ impl ConversationListView {
             toggle_view_all_button,
             item_overflow_menu,
             overflow_menu_state: None,
+            new_conversation_menu,
+            new_conversation_menu_open: false,
             sharing_dialog,
             rename_editor,
             renaming_conversation_id: None,
@@ -862,7 +892,7 @@ fn render_zero_state(
         })
         .with_cursor(Cursor::PointingHand)
         .on_click(|ctx, _, _| {
-            ctx.dispatch_typed_action(ConversationListViewAction::NewConversationInNewTab);
+            ctx.dispatch_typed_action(ConversationListViewAction::StartDefaultNewConversation);
         });
     container.add_child(new_conversation_button.finish());
 
@@ -1190,6 +1220,20 @@ impl TypedActionView for ConversationListView {
                 });
             }
             ConversationListViewAction::OpenItem { id } => {
+                // External sessions open into the management view focused on the entry,
+                // so the user can preview the transcript before resuming. When the
+                // management view isn't available, fall through to the resume action.
+                if matches!(id, AgentConversationEntryId::ExternalSession(_))
+                    && FeatureFlag::AgentManagementView.is_enabled()
+                    && AISettings::as_ref(ctx).is_any_ai_enabled(ctx)
+                {
+                    Self::send_open_telemetry(id, ctx);
+                    ctx.dispatch_typed_action(&WorkspaceAction::OpenAgentManagementViewForEntry {
+                        item_id: *id,
+                    });
+                    return;
+                }
+
                 let Some(action) = AgentConversationsModel::resolve_open_action(
                     AgentConversationNavigationSubject::Entry(*id),
                     None,
@@ -1227,6 +1271,66 @@ impl TypedActionView for ConversationListView {
             }
             ConversationListViewAction::NewConversationInNewTab => {
                 ctx.emit(Event::NewConversationInNewTab);
+            }
+            ConversationListViewAction::StartDefaultNewConversation => {
+                match AISettings::as_ref(ctx).default_new_conversation_agent() {
+                    DefaultNewConversationAgent::WarpAgent => {
+                        ctx.emit(Event::NewConversationInNewTab);
+                    }
+                    DefaultNewConversationAgent::ClaudeCode => {
+                        ctx.dispatch_typed_action(&WorkspaceAction::StartExternalAgentSession {
+                            kind: ExternalAgentKind::ClaudeCode,
+                        });
+                    }
+                    DefaultNewConversationAgent::Codex => {
+                        ctx.dispatch_typed_action(&WorkspaceAction::StartExternalAgentSession {
+                            kind: ExternalAgentKind::Codex,
+                        });
+                    }
+                }
+            }
+            ConversationListViewAction::StartExternalConversation { kind } => {
+                self.new_conversation_menu_open = false;
+                ctx.dispatch_typed_action(&WorkspaceAction::StartExternalAgentSession {
+                    kind: *kind,
+                });
+                ctx.notify();
+            }
+            ConversationListViewAction::ToggleNewConversationMenu => {
+                if self.new_conversation_menu_open {
+                    self.new_conversation_menu_open = false;
+                } else {
+                    self.new_conversation_menu_open = true;
+                    let items = vec![
+                        MenuItemFields::new("New Warp Agent conversation")
+                            .with_on_select_action(
+                                ConversationListViewAction::NewConversationInNewTab,
+                            )
+                            .into_item(),
+                        MenuItemFields::new(
+                            DefaultNewConversationAgent::ClaudeCode.new_conversation_label(),
+                        )
+                        .with_on_select_action(
+                            ConversationListViewAction::StartExternalConversation {
+                                kind: ExternalAgentKind::ClaudeCode,
+                            },
+                        )
+                        .into_item(),
+                        MenuItemFields::new(
+                            DefaultNewConversationAgent::Codex.new_conversation_label(),
+                        )
+                        .with_on_select_action(
+                            ConversationListViewAction::StartExternalConversation {
+                                kind: ExternalAgentKind::Codex,
+                            },
+                        )
+                        .into_item(),
+                    ];
+                    self.new_conversation_menu.update(ctx, |menu, ctx| {
+                        menu.set_items(items, ctx);
+                    });
+                }
+                ctx.notify();
             }
             ConversationListViewAction::ToggleSection(section) => {
                 self.toggle_section_collapse(*section, ctx);
@@ -1337,6 +1441,8 @@ impl View for ConversationListView {
             let list_items = self.list_items.clone();
             let overflow_menu = self.item_overflow_menu.clone();
             let overflow_menu_state = self.overflow_menu_state;
+            let new_conversation_menu = self.new_conversation_menu.clone();
+            let new_conversation_menu_open = self.new_conversation_menu_open;
             let focused_conversation = ActiveAgentViewsModel::as_ref(app)
                 .get_focused_conversation(self.window_id)
                 .map(AgentConversationEntryId::from);
@@ -1453,6 +1559,8 @@ impl View for ConversationListView {
                                         is_selected,
                                         index,
                                         state: &start_new_conversation_state,
+                                        new_conversation_menu: &new_conversation_menu,
+                                        menu_open: new_conversation_menu_open,
                                     },
                                     app,
                                 )),

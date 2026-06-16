@@ -81,13 +81,14 @@ use crate::settings::{
     AgentModeCodingPermissionsType, AgentModeCommandExecutionDenylist,
     AgentModeCommandExecutionPredicate, AgentModeQuerySuggestionsEnabled, AwsBedrockAutoLogin,
     AwsBedrockCredentialsEnabled, CanUseWarpCreditsForFallback, CodeSettings,
-    CodebaseContextEnabled, FileBasedMcpEnabled, GitOperationsAutogenEnabled,
-    IncludeAgentCommandsInHistory, InputSettings, IntelligentAutosuggestionsEnabled, MemoryEnabled,
-    NLDInTerminalEnabled, NaturalLanguageAutosuggestionsEnabled, OrchestrationMessageDisplayMode,
-    PromptSubmissionMode, RuleSuggestionsEnabled, SharedBlockTitleGenerationEnabled,
-    ShouldRenderCLIAgentToolbar, ShouldRenderUseAgentToolbarForUserCommands,
-    ShouldShowOzUpdatesInZeroState, ShowAgentTips, ShowConversationHistory, ShowHintText,
-    ThinkingDisplayMode, VoiceInputEnabled, WarpDriveContextEnabled,
+    CodebaseContextEnabled, DefaultNewConversationAgent, FileBasedMcpEnabled,
+    GitOperationsAutogenEnabled, IncludeAgentCommandsInHistory, InputSettings,
+    IntelligentAutosuggestionsEnabled, MemoryEnabled, NLDInTerminalEnabled,
+    NaturalLanguageAutosuggestionsEnabled, OrchestrationMessageDisplayMode, PromptSubmissionMode,
+    RuleSuggestionsEnabled, SharedBlockTitleGenerationEnabled, ShouldRenderCLIAgentToolbar,
+    ShouldRenderUseAgentToolbarForUserCommands, ShouldShowOzUpdatesInZeroState, ShowAgentTips,
+    ShowConversationHistory, ShowHintText, ThinkingDisplayMode, VoiceInputEnabled,
+    WarpDriveContextEnabled,
 };
 use crate::terminal::session_settings::{SessionSettings, SessionSettingsChangedEvent};
 use crate::terminal::CLIAgent;
@@ -675,6 +676,7 @@ pub struct AISettingsPageView {
     thinking_display_mode_dropdown: ViewHandle<Dropdown<AISettingsPageAction>>,
     orchestration_message_display_mode_dropdown: ViewHandle<Dropdown<AISettingsPageAction>>,
     default_prompt_submission_mode_dropdown: ViewHandle<Dropdown<AISettingsPageAction>>,
+    default_new_conversation_agent_dropdown: ViewHandle<Dropdown<AISettingsPageAction>>,
     #[cfg(feature = "local_fs")]
     conversation_layout_dropdown: ViewHandle<Dropdown<AISettingsPageAction>>,
 
@@ -838,6 +840,18 @@ impl AISettingsPageView {
             default_prompt_submission_mode_dropdown.update(ctx, |dropdown, ctx| {
                 dropdown.set_selected_by_action(
                     AISettingsPageAction::SetPromptSubmissionMode(current_mode),
+                    ctx,
+                );
+            });
+        }
+
+        let default_new_conversation_agent_dropdown =
+            OtherAIWidget::create_default_new_conversation_agent_dropdown(ctx);
+        {
+            let current_agent = AISettings::as_ref(ctx).default_new_conversation_agent_internal;
+            default_new_conversation_agent_dropdown.update(ctx, |dropdown, ctx| {
+                dropdown.set_selected_by_action(
+                    AISettingsPageAction::SetDefaultNewConversationAgent(current_agent),
                     ctx,
                 );
             });
@@ -1264,6 +1278,17 @@ impl AISettingsPageView {
                         .update(ctx, |dropdown, ctx| {
                             dropdown.set_selected_by_action(
                                 AISettingsPageAction::SetPromptSubmissionMode(current_mode),
+                                ctx,
+                            );
+                        });
+                }
+                AISettingsChangedEvent::DefaultNewConversationAgent { .. } => {
+                    let current_agent =
+                        AISettings::as_ref(ctx).default_new_conversation_agent_internal;
+                    me.default_new_conversation_agent_dropdown
+                        .update(ctx, |dropdown, ctx| {
+                            dropdown.set_selected_by_action(
+                                AISettingsPageAction::SetDefaultNewConversationAgent(current_agent),
                                 ctx,
                             );
                         });
@@ -1792,6 +1817,7 @@ impl AISettingsPageView {
             thinking_display_mode_dropdown,
             orchestration_message_display_mode_dropdown,
             default_prompt_submission_mode_dropdown,
+            default_new_conversation_agent_dropdown,
             #[cfg(feature = "local_fs")]
             conversation_layout_dropdown,
             profile_views,
@@ -3007,6 +3033,7 @@ pub enum AISettingsPageAction {
     SetThinkingDisplayMode(ThinkingDisplayMode),
     SetOrchestrationMessageDisplayMode(OrchestrationMessageDisplayMode),
     SetPromptSubmissionMode(PromptSubmissionMode),
+    SetDefaultNewConversationAgent(DefaultNewConversationAgent),
     AttemptLoginGatedUpgrade,
     RemoveCLIAgentToolbarEnabledCommand(String),
     RemoveFromCommandExecutionAllowlist(AgentModeCommandExecutionPredicate),
@@ -3480,6 +3507,14 @@ impl TypedActionView for AISettingsPageView {
                     report_if_error!(settings
                         .default_prompt_submission_mode
                         .set_value(*mode, ctx));
+                });
+                ctx.notify();
+            }
+            AISettingsPageAction::SetDefaultNewConversationAgent(agent) => {
+                AISettings::handle(ctx).update(ctx, |settings, ctx| {
+                    report_if_error!(settings
+                        .default_new_conversation_agent_internal
+                        .set_value(*agent, ctx));
                 });
                 ctx.notify();
             }
@@ -6566,6 +6601,28 @@ impl OtherAIWidget {
         })
     }
 
+    fn create_default_new_conversation_agent_dropdown(
+        ctx: &mut ViewContext<AISettingsPageView>,
+    ) -> ViewHandle<Dropdown<AISettingsPageAction>> {
+        let items: Vec<DropdownItem<AISettingsPageAction>> = DefaultNewConversationAgent::iter()
+            .map(|agent| {
+                DropdownItem::new(
+                    agent.display_name(),
+                    AISettingsPageAction::SetDefaultNewConversationAgent(agent),
+                )
+            })
+            .collect();
+
+        ctx.add_typed_action_view(|ctx| {
+            let mut dropdown = Dropdown::new(ctx);
+            dropdown.set_top_bar_max_width(AI_SETTINGS_DROPDOWN_WIDTH);
+            dropdown.set_menu_width(AI_SETTINGS_DROPDOWN_WIDTH, ctx);
+            dropdown.set_menu_max_height(AI_SETTINGS_DROPDOWN_MAX_HEIGHT, ctx);
+            dropdown.add_items(items, ctx);
+            dropdown
+        })
+    }
+
     fn create_orchestration_message_display_mode_dropdown(
         ctx: &mut ViewContext<AISettingsPageView>,
     ) -> ViewHandle<Dropdown<AISettingsPageAction>> {
@@ -6679,6 +6736,26 @@ impl SettingsWidget for OtherAIWidget {
             (!is_any_ai_enabled).then(|| appearance.theme().disabled_ui_text_color()),
             &view.thinking_display_mode_dropdown,
         ));
+
+        if FeatureFlag::ExternalAgentSessionsInConversations.is_enabled() {
+            column.add_child(render_dropdown_item(
+                appearance,
+                "Default new conversation agent",
+                Some(
+                    "Which agent the New Conversation button starts on a primary click. \
+                     The dropdown always offers all options.",
+                ),
+                None,
+                LocalOnlyIconState::for_setting(
+                    DefaultNewConversationAgent::storage_key(),
+                    DefaultNewConversationAgent::sync_to_cloud(),
+                    &mut view.local_only_icon_tooltip_states.borrow_mut(),
+                    app,
+                ),
+                None,
+                &view.default_new_conversation_agent_dropdown,
+            ));
+        }
 
         column.add_child(render_dropdown_item(
             appearance,
