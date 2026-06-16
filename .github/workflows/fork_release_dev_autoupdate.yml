@@ -1,0 +1,228 @@
+# Self-contained macOS release workflow for the autoupdate-enabled `dev` channel.
+#
+# This is the release counterpart to `fork_release_macos.yml` (which builds the
+# `oss` channel). The `oss` channel cannot auto-update — only `dev`/`preview`/
+# `stable` are wired into the updater, and `dev` is the one this fork repoints at
+# its own GitHub Releases (see app/src/bin/dev.rs and
+# docs/in-app-update-github-releases.md).
+#
+# It runs entirely on GitHub-hosted runners and needs NO secrets beyond the
+# built-in GITHUB_TOKEN. It builds the `dev` channel with the `autoupdate`
+# feature, self-signs the app ad-hoc (no Apple certs), packages a per-arch .dmg,
+# generates the autoupdate manifest, and publishes a GitHub Release whose assets
+# are exactly what the in-app updater downloads:
+#
+#   WarpDev-arm64.dmg      (Apple Silicon)
+#   WarpDev.dmg            (Intel)
+#   channel_versions.json  (served from <repo>/releases/latest/download/...)
+#
+# The release tag MUST equal the version string the updater parses
+# (`v0.YYYY.MM.DD.HH.mm.<label>_<patch>`); this workflow enforces that format.
+#
+# Trigger:
+#   - Manually via the Actions tab (workflow_dispatch). Leave `version` blank to
+#     auto-generate one from the current UTC time, or pass an explicit value.
+#   - Push a correctly-formatted tag, e.g.
+#       git tag v0.2026.06.14.21.30.dev_1 && git push origin v0.2026.06.14.21.30.dev_1
+#
+# NOTE: the produced .dmg is ad-hoc signed and NOT notarized. On first launch,
+# macOS Gatekeeper will require right-click > Open (or
+# `xattr -dr com.apple.quarantine /Applications/WarpDev.app`).
+
+name: Fork Release (Dev, autoupdate)
+
+on:
+  push:
+    tags:
+      - "v0.*.dev_*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version string (must be v0.YYYY.MM.DD.HH.mm.<label>_<patch>). Leave blank to auto-generate from the current UTC time."
+        required: false
+        type: string
+
+# Needed for softprops/action-gh-release to create releases and upload assets.
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # The autoupdate-capable internal channel. Builds the `dev` binary / `WarpDev`
+  # app (see script/macos/bundle).
+  CHANNEL: dev
+
+jobs:
+  setup:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+    steps:
+      - name: Resolve version string
+        id: version
+        # INPUT_VERSION is passed via env (not interpolated into the script body)
+        # to avoid shell injection from the workflow_dispatch input.
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME}"
+          elif [[ -n "$INPUT_VERSION" ]]; then
+            VERSION="$INPUT_VERSION"
+          else
+            VERSION="v0.$(date -u +%Y.%m.%d.%H.%M).dev_${GITHUB_RUN_NUMBER}"
+          fi
+          # The autoupdate version parser (crates/channel_versions) requires:
+          #   v<major>.<YYYY>.<MM>.<DD>.<HH>.<mm>.<label>_<patch>
+          # and the GitHub release tag must equal this string exactly, since it
+          # becomes the <version> path segment in the artifact download URL.
+          if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]{2}\.[0-9]{2}\..+_[0-9]+$ ]]; then
+            echo "::error::Version '$VERSION' must match v<major>.<YYYY>.<MM>.<DD>.<HH>.<mm>.<label>_<patch> (e.g. v0.2026.06.14.21.30.dev_1)"
+            exit 1
+          fi
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $VERSION"
+        shell: bash
+
+  build_macos:
+    name: Build macOS (${{ matrix.dmg_label }})
+    needs: setup
+    runs-on: macos-14
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The updater downloads WarpDev-arm64.dmg on Apple Silicon and
+          # WarpDev.dmg otherwise (see app/src/autoupdate/mac.rs `dmg_name`).
+          - arch: aarch64
+            dmg_suffix_args: "--dmg-name-suffix arm64"
+            dmg_label: arm64
+          - arch: x86_64
+            dmg_suffix_args: ""
+            dmg_label: x86_64
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      # Reuse the upstream environment setup. It installs protoc, Node/Corepack,
+      # the Rust toolchain cache, and release deps (cargo-about for license
+      # generation). The private warp-channel-config SSH step inside this action
+      # only runs in warpdotdev/warp-internal, so on a fork it is a safe no-op —
+      # this fork's `dev` binary builds its ChannelConfig inline instead.
+      - uses: ./.github/actions/prepare_environment
+        with:
+          target_os: macos
+          is_self_hosted: false
+          install_release_deps: true
+
+      - name: Ensure rust target is installed
+        run: rustup target add ${{ matrix.arch }}-apple-darwin
+        shell: bash
+
+      - name: Setup Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version: stable
+
+      - name: Install cargo-bundle
+        run: script/install_cargo_bundle
+
+      - name: Install create-dmg
+        run: brew install create-dmg
+
+      - name: Build ${{ matrix.arch }} dev bundle (autoupdate, self-signed)
+        id: bundle
+        # VERSION is used as both the build's stamped version (GIT_RELEASE_TAG)
+        # and the release tag / artifact path segment, so they must match.
+        run: |
+          script/bundle \
+            --channel "$CHANNEL" \
+            --selfsign \
+            --arch ${{ matrix.arch }} \
+            --features autoupdate \
+            --release-tag "$VERSION" \
+            ${{ matrix.dmg_suffix_args }}
+        shell: bash
+        env:
+          VERSION: ${{ needs.setup.outputs.version }}
+          GIT_RELEASE_TAG: ${{ needs.setup.outputs.version }}
+
+      - name: Upload DMG as workflow artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: dmg-${{ matrix.dmg_label }}
+          path: ${{ steps.bundle.outputs.dmg_path }}
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: [setup, build_macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: artifacts
+
+      - name: Stage release assets
+        env:
+          VERSION: ${{ needs.setup.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          # Collect the dmgs produced by the per-arch matrix jobs.
+          find artifacts -name '*.dmg' -exec cp {} out/ \;
+          echo "Staged dmgs:"
+          ls -l out
+
+          # Sanity-check both expected dmg names are present.
+          for f in WarpDev.dmg WarpDev-arm64.dmg; do
+            if [[ ! -f "out/$f" ]]; then
+              echo "::error::expected asset out/$f is missing"
+              exit 1
+            fi
+          done
+
+          # The manifest the updater fetches from
+          # <releases_base_url>/latest/download/channel_versions.json. `dev`,
+          # `preview` and `stable` are all required by the schema even though the
+          # dev build only reads `dev`.
+          cat > out/channel_versions.json <<EOF
+          {
+            "dev":     { "version": "$VERSION" },
+            "preview": { "version": "$VERSION" },
+            "stable":  { "version": "$VERSION" }
+          }
+          EOF
+          echo "Generated manifest:"
+          cat out/channel_versions.json
+        shell: bash
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2.2.2
+        with:
+          tag_name: ${{ needs.setup.outputs.version }}
+          name: WarpDev ${{ needs.setup.outputs.version }}
+          body: |
+            Self-contained `dev`-channel build of this Warp fork with in-app
+            updates served from this repository's GitHub Releases.
+
+            **Assets**
+            - `WarpDev-arm64.dmg` — Apple Silicon
+            - `WarpDev.dmg` — Intel
+            - `channel_versions.json` — autoupdate manifest
+
+            The .dmg is ad-hoc signed and NOT notarized. On first launch, macOS
+            Gatekeeper will block it: right-click the app and choose **Open**, or
+            run `xattr -dr com.apple.quarantine /Applications/WarpDev.app`.
+          draft: false
+          # Must be a non-prerelease marked "latest" so the updater can resolve
+          # <repo>/releases/latest/download/channel_versions.json.
+          prerelease: false
+          make_latest: true
+          files: |
+            out/WarpDev.dmg
+            out/WarpDev-arm64.dmg
+            out/channel_versions.json
+          token: ${{ secrets.GITHUB_TOKEN }}
