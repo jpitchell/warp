@@ -201,6 +201,7 @@ use crate::ai::conversation_details_panel::ConversationDetailsPanel;
 use crate::ai::document::ai_document_model::{AIDocumentId, AIDocumentModel};
 use crate::ai::execution_profiles::editor::ExecutionProfileEditorManager;
 use crate::ai::execution_profiles::profiles::{AIExecutionProfilesModel, ClientProfileId};
+use crate::ai::external_sessions::{ExternalAgentKind, ExternalSessionId};
 use crate::ai::facts::view::AIFactPage;
 use crate::ai::facts::{AIFactManager, AIFactView, AIFactViewEvent};
 use crate::ai::llms::LLMPreferences;
@@ -12165,6 +12166,56 @@ impl Workspace {
                 });
             }
         });
+    }
+
+    /// Resume an externally-run Claude Code / Codex session: open a new terminal
+    /// pane in the session's working directory and run the CLI's native resume
+    /// command. If the CLI isn't installed, surface a toast and leave the row in
+    /// place (it's still browsable).
+    fn resume_external_agent_session(
+        &mut self,
+        id: ExternalSessionId,
+        cwd: PathBuf,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        use crate::util::path::resolve_executable;
+        use crate::view_components::ToastFlavor;
+
+        let (cli, command) = match id.agent {
+            ExternalAgentKind::ClaudeCode => ("claude", format!("claude --resume {}", id.uuid)),
+            ExternalAgentKind::Codex => ("codex", format!("codex resume {}", id.uuid)),
+        };
+
+        if resolve_executable(cli).is_none() {
+            let message =
+                format!("'{cli}' CLI not found on your PATH — can't resume this session.");
+            self.toast_stack.update(ctx, |toast_stack, ctx| {
+                toast_stack
+                    .add_ephemeral_toast(DismissibleToast::new(message, ToastFlavor::Error), ctx);
+            });
+            return;
+        }
+
+        let initial_directory = Some(cwd).filter(|path| path.is_dir());
+        self.add_tab_with_pane_layout(
+            PanesLayout::SingleTerminal(Box::new(NewTerminalOptions {
+                initial_directory,
+                ..Default::default()
+            })),
+            Arc::new(HashMap::new()),
+            None,
+            ctx,
+        );
+
+        if let Some(terminal_view) = self
+            .active_tab_pane_group()
+            .as_ref(ctx)
+            .active_session_view(ctx)
+        {
+            terminal_view.update(ctx, |terminal, ctx| {
+                terminal.set_pending_command_queue(vec![command], ctx);
+            });
+        }
     }
 
     pub fn add_tab_with_pane_layout(
@@ -24349,6 +24400,9 @@ impl TypedActionView for Workspace {
                 if !self.focus_terminal_view_locally(*terminal_view_id, ctx) {
                     self.focus_terminal_view_in_other_window(*terminal_view_id, ctx);
                 }
+            }
+            ResumeExternalAgentSession { id, cwd } => {
+                self.resume_external_agent_session(*id, cwd.clone(), ctx);
             }
             FocusPane(locator) => {
                 self.focus_pane(*locator, ctx);

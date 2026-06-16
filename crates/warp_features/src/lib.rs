@@ -689,6 +689,11 @@ pub enum FeatureFlag {
     /// flows while the default behavior temporarily keeps them disabled.
     LocalClaudeCodexChildHarnesses,
 
+    /// Surfaces externally-run Claude Code / Codex sessions (scanned from
+    /// `~/.claude` and `~/.codex`) in the Agent Conversations pane: list,
+    /// search, read-only transcript preview, and native-CLI resume.
+    ExternalAgentSessionsInConversations,
+
     /// Gates client-side support for the `orchestrate` tool, which batches
     /// multiple child agents into a single tool call with an inline
     /// confirmation card. When enabled, the client advertises

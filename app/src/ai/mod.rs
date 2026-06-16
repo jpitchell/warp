@@ -27,6 +27,7 @@ pub(crate) mod conversation_rename;
 pub(crate) mod conversation_status_ui;
 pub(crate) mod conversation_utils;
 pub(crate) mod document;
+pub(crate) mod external_sessions;
 pub(crate) mod get_relevant_files;
 pub mod harness_availability;
 pub(crate) mod harness_display;

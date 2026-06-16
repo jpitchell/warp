@@ -345,6 +345,8 @@ fn enabled_features() -> HashSet<FeatureFlag> {
         FeatureFlag::LocalComputerUse,
         #[cfg(feature = "local_claude_codex_child_harnesses")]
         FeatureFlag::LocalClaudeCodexChildHarnesses,
+        #[cfg(feature = "external_agent_sessions_in_conversations")]
+        FeatureFlag::ExternalAgentSessionsInConversations,
         #[cfg(feature = "team_api_keys")]
         FeatureFlag::TeamApiKeys,
         #[cfg(feature = "named_agents")]

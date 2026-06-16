@@ -2,6 +2,7 @@
 pub mod entry;
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -41,6 +42,7 @@ use crate::ai::blocklist::{
 };
 use crate::ai::cloud_environments::CloudAmbientAgentEnvironment;
 use crate::ai::conversation_navigation::ConversationNavigationData;
+use crate::ai::external_sessions::{ExternalAgentKind, ExternalSessionId, ExternalSessionsModel};
 use crate::auth::auth_manager::{AuthManager, AuthManagerEvent};
 use crate::auth::AuthStateProvider;
 use crate::cloud_object::CloudObjectLookup as _;
@@ -54,10 +56,15 @@ use crate::server::server_api::ai::TaskListFilter;
 use crate::server::server_api::presigned_upload::HttpStatusError;
 use crate::server::server_api::ServerApiProvider;
 use crate::settings::AISettings;
+use crate::terminal::cli_agent_sessions::{CLIAgentSession, CLIAgentSessionsModel};
+use crate::terminal::CLIAgent;
 use crate::ui_components::icons::Icon;
 use crate::workspace::{RestoreConversationLayout, WorkspaceAction};
 
 const POLLING_INTERVAL: Duration = Duration::from_secs(30);
+/// How recently an external session's transcript must have changed to be treated
+/// as "active" even when no Warp pane is tracking it.
+const EXTERNAL_SESSION_FRESHNESS: chrono::Duration = chrono::Duration::minutes(2);
 const RTC_TASK_REFRESH_THROTTLE: Duration = Duration::from_secs(5);
 const INITIAL_TASK_AMOUNT: i32 = 100;
 
@@ -638,6 +645,14 @@ impl AgentConversationsModel {
             me.sync_conversations(ctx);
         });
 
+        // Re-render list surfaces when the external-session index finishes a scan.
+        if FeatureFlag::ExternalAgentSessionsInConversations.is_enabled() {
+            let external_sessions = ExternalSessionsModel::handle(ctx);
+            ctx.subscribe_to_model(&external_sessions, |_me, _event, ctx| {
+                ctx.emit(AgentConversationsModelEvent::TasksUpdated);
+            });
+        }
+
         // Subscribe to UpdateManager for RTC task updates
         if FeatureFlag::AmbientAgentsRTC.is_enabled() {
             let update_manager = UpdateManager::handle(ctx);
@@ -1021,6 +1036,12 @@ impl AgentConversationsModel {
         if let Some(dirty_since) = self.dirty_since.take() {
             self.fetch_tasks_updated_after(dirty_since, ctx);
         }
+
+        // Rescan external agent sessions so the list reflects new/updated
+        // Claude Code / Codex transcripts whenever a list surface opens.
+        if FeatureFlag::ExternalAgentSessionsInConversations.is_enabled() {
+            ExternalSessionsModel::handle(ctx).update(ctx, |model, ctx| model.refresh(ctx));
+        }
     }
 
     /// Called when a view that consumes this model's data becomes hidden.
@@ -1239,11 +1260,53 @@ impl AgentConversationsModel {
             ));
         }
 
+        if FeatureFlag::ExternalAgentSessionsInConversations.is_enabled() {
+            let external_model = ExternalSessionsModel::as_ref(app);
+            let active = self.active_external_session_ids(app);
+            for index_entry in external_model.entries() {
+                entries.push(entry::entry_for_external_session(
+                    index_entry,
+                    active.contains(&index_entry.id),
+                ));
+            }
+        }
+
         entries
             .into_iter()
             .filter(|entry| entry.matches_filters(filters, app))
             .sorted_by(|a, b| b.display.last_updated.cmp(&a.display.last_updated))
             .collect()
+    }
+
+    /// IDs of external sessions Warp considers currently live. Populated in a later
+    /// phase by correlating against running CLI-agent panes; empty for now so all
+    /// external sessions display as past.
+    /// External sessions Warp considers currently live: those with a running
+    /// CLI-agent pane (matched by session uuid), plus any whose transcript was
+    /// modified within the freshness window (covers live runs in panes Warp
+    /// doesn't track, e.g. an external terminal).
+    fn active_external_session_ids(&self, app: &AppContext) -> HashSet<ExternalSessionId> {
+        let mut active: HashSet<ExternalSessionId> = CLIAgentSessionsModel::as_ref(app)
+            .sessions()
+            .filter_map(|(_, session)| external_session_id_for_cli_session(session))
+            .collect();
+
+        let now = Utc::now();
+        for entry in ExternalSessionsModel::as_ref(app).entries() {
+            if now - entry.last_modified < EXTERNAL_SESSION_FRESHNESS {
+                active.insert(entry.id);
+            }
+        }
+        active
+    }
+
+    /// The terminal view running this external session, if Warp is tracking one,
+    /// so opening focuses that pane instead of spawning a duplicate.
+    fn active_external_pane(&self, id: &ExternalSessionId, app: &AppContext) -> Option<EntityId> {
+        CLIAgentSessionsModel::as_ref(app)
+            .sessions()
+            .find(|(_, session)| external_session_id_for_cli_session(session) == Some(*id))
+            .map(|(terminal_view_id, _)| terminal_view_id)
     }
 
     pub fn get_entry_by_id(
@@ -1277,6 +1340,17 @@ impl AgentConversationsModel {
                             )
                         })
                 }),
+            AgentConversationEntryId::ExternalSession(id) => {
+                if !FeatureFlag::ExternalAgentSessionsInConversations.is_enabled() {
+                    return None;
+                }
+                let active = self.active_external_session_ids(app);
+                ExternalSessionsModel::as_ref(app)
+                    .get(id)
+                    .map(|index_entry| {
+                        entry::entry_for_external_session(index_entry, active.contains(id))
+                    })
+            }
         }
     }
 
@@ -1325,6 +1399,21 @@ impl AgentConversationsModel {
         app: &AppContext,
     ) -> Option<WorkspaceAction> {
         let active_views_model = ActiveAgentViewsModel::as_ref(app);
+
+        // External sessions: focus a correlated running pane if one exists
+        // (populated in a later phase), otherwise resume via the CLI.
+        if let AgentConversationEntryId::ExternalSession(id) = entry.id {
+            if let Some(terminal_view_id) = self.active_external_pane(&id, app) {
+                return Some(WorkspaceAction::FocusTerminalViewInWorkspace { terminal_view_id });
+            }
+            let cwd = entry
+                .display
+                .working_directory
+                .clone()
+                .map(PathBuf::from)
+                .unwrap_or_default();
+            return Some(WorkspaceAction::ResumeExternalAgentSession { id, cwd });
+        }
 
         if let Some(task_id) = entry.identity.ambient_agent_task_id {
             match self
@@ -1931,6 +2020,23 @@ impl AgentConversationsModel {
         // Reset the initial load flag so that we can retry the initial sync with the new logged in user
         self.has_finished_initial_load = false;
     }
+}
+
+/// Map a tracked CLI-agent pane to the external session it is running, when the
+/// agent is one we index (Claude Code / Codex) and the pane reported a parseable
+/// session uuid.
+fn external_session_id_for_cli_session(session: &CLIAgentSession) -> Option<ExternalSessionId> {
+    let agent = match session.agent {
+        CLIAgent::Claude => ExternalAgentKind::ClaudeCode,
+        CLIAgent::Codex => ExternalAgentKind::Codex,
+        _ => return None,
+    };
+    let uuid = session
+        .session_context
+        .session_id
+        .as_deref()
+        .and_then(|raw| uuid::Uuid::parse_str(raw).ok())?;
+    Some(ExternalSessionId { agent, uuid })
 }
 
 #[cfg(test)]

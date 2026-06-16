@@ -45,6 +45,10 @@ use crate::ai::ambient_agents::{cancel_task_with_toast, AmbientAgentTaskId};
 use crate::ai::artifacts::{Artifact, ArtifactButtonsRow, ArtifactButtonsRowEvent};
 use crate::ai::blocklist::BlocklistAIHistoryModel;
 use crate::ai::cloud_environments::{AmbientAgentEnvironment, CloudAmbientAgentEnvironment};
+use crate::ai::external_sessions::transcript::{
+    NormalizedTranscript, TranscriptBlock, TranscriptRole,
+};
+use crate::ai::external_sessions::ExternalSessionId;
 use crate::ai::harness_availability::HarnessAvailabilityModel;
 use crate::ai::harness_display;
 use crate::appearance::Appearance;
@@ -653,6 +657,13 @@ pub struct ConversationDetailsPanel {
     /// Selection state for cmd+C copy.
     selection_handle: SelectionHandle,
     selected_text: Arc<RwLock<Option<String>>>,
+    /// Read-only transcript preview for an externally-run Claude Code / Codex
+    /// session, lazily loaded off-thread when such an entry is selected.
+    external_transcript: Option<Arc<NormalizedTranscript>>,
+    external_transcript_loading: bool,
+    /// Which external session the transcript state is for, so a late-arriving
+    /// async load for a previously-selected entry is ignored.
+    external_transcript_id: Option<ExternalSessionId>,
 }
 
 impl ConversationDetailsPanel {
@@ -707,6 +718,9 @@ impl ConversationDetailsPanel {
             copy_feedback_times: HashMap::new(),
             selection_handle: SelectionHandle::default(),
             selected_text: Default::default(),
+            external_transcript: None,
+            external_transcript_loading: false,
+            external_transcript_id: None,
         }
     }
 
@@ -718,6 +732,39 @@ impl ConversationDetailsPanel {
         self.set_artifacts(&data, ctx);
         self.set_action_buttons(&data, ctx);
         self.data = data;
+        // Switching entries clears any external transcript; callers re-populate it
+        // for external sessions after this call.
+        self.external_transcript = None;
+        self.external_transcript_loading = false;
+        self.external_transcript_id = None;
+        ctx.notify();
+    }
+
+    /// Show a loading state while `id`'s transcript is parsed off-thread.
+    pub fn set_external_transcript_loading(
+        &mut self,
+        id: ExternalSessionId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.external_transcript = None;
+        self.external_transcript_loading = true;
+        self.external_transcript_id = Some(id);
+        ctx.notify();
+    }
+
+    /// Populate the read-only transcript preview for `id`. Ignored if the panel has
+    /// since moved to a different entry.
+    pub fn set_external_transcript(
+        &mut self,
+        id: ExternalSessionId,
+        transcript: Arc<NormalizedTranscript>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if self.external_transcript_id != Some(id) {
+            return;
+        }
+        self.external_transcript = Some(transcript);
+        self.external_transcript_loading = false;
         ctx.notify();
     }
 
@@ -1686,6 +1733,89 @@ impl ConversationDetailsPanel {
             .finish()
     }
 
+    /// Maximum transcript messages rendered in the preview, to bound work for very
+    /// long sessions. A truncation note is shown when exceeded.
+    const MAX_TRANSCRIPT_MESSAGES: usize = 200;
+
+    /// Read-only preview of an external session's transcript. Returns `None` when
+    /// there's nothing to show (not an external session / not yet requested).
+    fn render_transcript_section(&self, appearance: &Appearance) -> Option<Box<dyn Element>> {
+        let theme = appearance.theme();
+        let ui_font_size = appearance.ui_font_size();
+
+        if self.external_transcript_loading {
+            return Some(self.render_simple_field("Transcript", "Loading…", appearance));
+        }
+
+        let transcript = self.external_transcript.as_ref()?;
+
+        let mut column = Flex::column()
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_main_axis_size(MainAxisSize::Min);
+
+        column.add_child(
+            Container::new(
+                Text::new(
+                    "Transcript".to_string(),
+                    appearance.ui_font_family(),
+                    ui_font_size,
+                )
+                .with_color(blended_colors::text_sub(theme, theme.surface_1()))
+                .finish(),
+            )
+            .with_margin_bottom(SECTION_HEADER_GAP)
+            .finish(),
+        );
+
+        for message in transcript
+            .messages
+            .iter()
+            .take(Self::MAX_TRANSCRIPT_MESSAGES)
+        {
+            let role_label = match message.role {
+                TranscriptRole::User => "You",
+                TranscriptRole::Assistant => "Agent",
+                TranscriptRole::System => "System",
+                TranscriptRole::Tool => "Tool",
+            };
+            let body = message
+                .blocks
+                .iter()
+                .map(|block| match block {
+                    TranscriptBlock::Text(text) => text.clone(),
+                    TranscriptBlock::ToolUse { name, .. } => format!("⚙ {name}"),
+                    TranscriptBlock::ToolResult { .. } => "↳ tool result".to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if body.trim().is_empty() {
+                continue;
+            }
+            column.add_child(
+                Container::new(self.render_simple_field(role_label, &body, appearance))
+                    .with_margin_bottom(FIELD_SPACING)
+                    .finish(),
+            );
+        }
+
+        if transcript.messages.len() > Self::MAX_TRANSCRIPT_MESSAGES {
+            column.add_child(
+                Text::new(
+                    format!(
+                        "Transcript truncated — showing the first {} messages.",
+                        Self::MAX_TRANSCRIPT_MESSAGES
+                    ),
+                    appearance.ui_font_family(),
+                    ui_font_size,
+                )
+                .with_color(blended_colors::text_sub(theme, theme.surface_1()))
+                .finish(),
+            );
+        }
+
+        Some(column.finish())
+    }
+
     fn render_simple_field(
         &self,
         label: &str,
@@ -2059,6 +2189,26 @@ impl View for ConversationDetailsPanel {
         if let Some(source_section) = self.render_source_section(appearance) {
             content.add_child(
                 Container::new(source_section)
+                    .with_margin_bottom(FIELD_SPACING)
+                    .finish(),
+            );
+        }
+
+        // Read-only transcript preview for externally-run sessions.
+        if let Some(transcript_section) = self.render_transcript_section(appearance) {
+            content.add_child(
+                Container::new(
+                    Container::new(Empty::new().finish())
+                        .with_border(
+                            Border::top(1.).with_border_fill(blended_colors::neutral_2(theme)),
+                        )
+                        .finish(),
+                )
+                .with_margin_bottom(FIELD_SPACING)
+                .finish(),
+            );
+            content.add_child(
+                Container::new(transcript_section)
                     .with_margin_bottom(FIELD_SPACING)
                     .finish(),
             );

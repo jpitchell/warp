@@ -47,7 +47,8 @@ impl InlineMenuAction for AcceptConversation {
         if let Some(item) = inline_menu_model.selected_item() {
             let active_ids =
                 ActiveAgentViewsModel::as_ref(app).get_all_active_conversation_ids(app);
-            let is_active = active_ids.contains(&ConversationOrTaskId::from(item.item_id));
+            let is_active = ConversationOrTaskId::try_from(item.item_id)
+                .is_ok_and(|id| active_ids.contains(&id));
 
             let text = if is_active {
                 " go to conversation"

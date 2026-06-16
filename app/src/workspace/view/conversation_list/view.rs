@@ -347,11 +347,21 @@ impl ConversationListView {
         let mut active_items = Vec::new();
         let mut past_items = Vec::new();
         for entry in model.filtered_items() {
-            let local_conversation_entry_id = model
-                .get_item_by_id(&entry.id, ctx)
+            let full_entry = model.get_item_by_id(&entry.id, ctx);
+            let local_conversation_entry_id = full_entry
+                .as_ref()
                 .and_then(|entry| entry.identity.local_conversation_id)
                 .map(AgentConversationEntryId::Conversation);
-            let is_active = active_ids.contains(&entry.id)
+            // External sessions aren't tracked by ActiveAgentViewsModel; treat them
+            // as active when their resolved status is working (running pane or fresh
+            // transcript).
+            let is_external_active =
+                matches!(entry.id, AgentConversationEntryId::ExternalSession(_))
+                    && full_entry
+                        .as_ref()
+                        .is_some_and(|entry| entry.display.status.is_working());
+            let is_active = is_external_active
+                || active_ids.contains(&entry.id)
                 || local_conversation_entry_id.is_some_and(|id| active_ids.contains(&id));
             if is_active {
                 active_items.push(ListItem::Conversation {
@@ -388,8 +398,9 @@ impl ConversationListView {
         active_items.sort_by(|a, b| {
             let get_time = |item: &ListItem| match item {
                 ListItem::Conversation { entry, .. } => {
-                    let entry_time = active_views_model
-                        .get_last_opened_time(&ConversationOrTaskId::from(entry.id));
+                    let entry_time = ConversationOrTaskId::try_from(entry.id)
+                        .ok()
+                        .and_then(|id| active_views_model.get_last_opened_time(&id));
                     let local_time = model
                         .get_item_by_id(&entry.id, ctx)
                         .and_then(|item| item.identity.local_conversation_id)
@@ -634,6 +645,8 @@ impl ConversationListView {
                     ctx
                 );
             }
+            // External Claude Code / Codex sessions have no dedicated open-telemetry event.
+            AgentConversationEntryId::ExternalSession(_) => {}
         }
     }
 

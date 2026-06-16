@@ -23,6 +23,7 @@ use crate::ai::agent::AIAgentExchangeId;
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::blocklist::PendingAttachment;
 use crate::ai::document::ai_document_model::{AIDocumentId, AIDocumentVersion};
+use crate::ai::external_sessions::ExternalSessionId;
 use crate::auth::auth_manager::LoginGatedFeature;
 use crate::drive::items::WarpDriveItemId;
 use crate::drive::CloudObjectTypeAndId;
@@ -519,6 +520,13 @@ pub enum WorkspaceAction {
     FocusTerminalViewInWorkspace {
         terminal_view_id: EntityId,
     },
+    /// Resume an externally-run Claude Code / Codex session by opening a new
+    /// terminal pane in its working directory and running the CLI's native
+    /// resume command.
+    ResumeExternalAgentSession {
+        id: ExternalSessionId,
+        cwd: PathBuf,
+    },
     /// Focus a specific pane by its locator (pane_group_id and pane_id).
     FocusPane(PaneViewLocator),
     /// Start a new AI conversation in a terminal view. This sets the pending query state
@@ -907,6 +915,7 @@ impl WorkspaceAction {
             | RunWorkflow { .. }
             | OpenFileInNewTab { .. }
             | RestoreOrNavigateToConversation { .. }
+            | ResumeExternalAgentSession { .. }
             | NewCodeFile
             | ForkAIConversation { .. }
             | SummarizeAIConversation { .. }

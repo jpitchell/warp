@@ -61,6 +61,9 @@ fn conversation_item_position_id(id: &AgentConversationEntryId) -> String {
         AgentConversationEntryId::AmbientRun(task_id) => {
             format!("conversation_list_task_{task_id}")
         }
+        AgentConversationEntryId::ExternalSession(id) => {
+            format!("conversation_list_{}", id.as_key())
+        }
     }
 }
 

@@ -59,6 +59,8 @@ use crate::ai::blocklist::format_credits;
 use crate::ai::conversation_details_panel::{
     ConversationDetailsData, ConversationDetailsPanel, ConversationDetailsPanelEvent,
 };
+use crate::ai::external_sessions::transcript::load_transcript;
+use crate::ai::external_sessions::ExternalSessionsModel;
 use crate::ai::harness_availability::HarnessAvailabilityModel;
 use crate::ai::harness_display;
 use crate::app_state::PersistedAgentManagementFilters;
@@ -1168,6 +1170,8 @@ impl AgentManagementView {
                             ctx
                         );
                     }
+                    // External sessions have no copy-link affordance.
+                    ManagementCardItemId::ExternalSession(_) => {}
                 }
 
                 ctx.clipboard()
@@ -1347,6 +1351,26 @@ impl AgentManagementView {
         self.details_panel.update(ctx, |p, ctx| {
             p.set_conversation_details(data, ctx);
         });
+
+        // For external Claude Code / Codex sessions, lazily parse the transcript
+        // off-thread and feed it into the read-only preview.
+        if let AgentConversationEntryId::ExternalSession(id) = entry.id {
+            if let Some(path) = ExternalSessionsModel::as_ref(ctx)
+                .get(&id)
+                .map(|index_entry| index_entry.jsonl_path.clone())
+            {
+                self.details_panel
+                    .update(ctx, |p, ctx| p.set_external_transcript_loading(id, ctx));
+                ctx.spawn(
+                    async move { load_transcript(id, &path) },
+                    move |this, transcript, ctx| {
+                        this.details_panel.update(ctx, |p, ctx| {
+                            p.set_external_transcript(id, Arc::new(transcript), ctx);
+                        });
+                    },
+                );
+            }
+        }
     }
 
     /// Update just the artifact buttons for a specific conversation
@@ -2386,6 +2410,8 @@ impl TypedActionView for AgentManagementView {
                             ctx
                         );
                     }
+                    // External Claude Code / Codex sessions have no open-telemetry event.
+                    ManagementCardItemId::ExternalSession(_) => {}
                 }
                 ctx.dispatch_typed_action(&action);
             }

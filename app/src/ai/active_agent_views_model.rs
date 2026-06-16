@@ -48,13 +48,20 @@ pub enum ConversationOrTaskId {
     TaskId(AmbientAgentTaskId),
 }
 
-impl From<AgentConversationEntryId> for ConversationOrTaskId {
-    fn from(id: AgentConversationEntryId) -> Self {
+impl TryFrom<AgentConversationEntryId> for ConversationOrTaskId {
+    type Error = ();
+
+    /// External sessions have no Warp-side conversation or task identity, so they
+    /// convert to `Err(())`; callers treat that as "not tracked here".
+    fn try_from(id: AgentConversationEntryId) -> Result<Self, Self::Error> {
         match id {
             AgentConversationEntryId::Conversation(conversation_id) => {
-                ConversationOrTaskId::ConversationId(conversation_id)
+                Ok(ConversationOrTaskId::ConversationId(conversation_id))
             }
-            AgentConversationEntryId::AmbientRun(task_id) => ConversationOrTaskId::TaskId(task_id),
+            AgentConversationEntryId::AmbientRun(task_id) => {
+                Ok(ConversationOrTaskId::TaskId(task_id))
+            }
+            AgentConversationEntryId::ExternalSession(_) => Err(()),
         }
     }
 }

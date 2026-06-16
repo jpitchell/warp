@@ -2144,6 +2144,7 @@ fn test_harness_filter_matches_only_selected_harness() {
                         AgentConversationEntryId::Conversation(conversation_id) => {
                             format!("conversation:{conversation_id}")
                         }
+                        AgentConversationEntryId::ExternalSession(id) => id.as_key(),
                     })
                     .collect()
             };
