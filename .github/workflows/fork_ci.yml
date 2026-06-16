@@ -103,10 +103,13 @@ jobs:
 
       # Compiling all of warp's test targets peaks above the ubuntu-latest
       # runner's ~16 GB of RAM, which got the "Compile tests" step OOM-killed
-      # (exit 143, "runner received a shutdown signal"). Add swap so the heavy
-      # link/codegen phase has headroom.
-      - name: Add swap space
+      # (exit 143, "runner received a shutdown signal"). The runner already ships
+      # with a small /swapfile, so turn that off and recreate it larger to give
+      # the heavy link/codegen phase headroom.
+      - name: Increase swap space
         run: |
+          sudo swapoff -a
+          sudo rm -f /swapfile
           sudo fallocate -l 12G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
