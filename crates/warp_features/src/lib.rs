@@ -370,10 +370,6 @@ pub enum FeatureFlag {
     /// Gates the bundled skill-based implementation of PR comment fetching.
     PRCommentsSkill,
 
-    /// An entrypoint pane type to launch other pane types from a search palette. The default view
-    /// when creating a tab.
-    WelcomeTab,
-
     /// A new first-time user experience which prioritizes choosing a coding repository.
     GetStartedTab,
 
@@ -799,9 +795,6 @@ pub enum FeatureFlag {
     /// Enables Warp local control through the standalone warpctrl CLI.
     WarpControlCli,
 
-    /// When enabled, free-tier users are blocked from AI features (no-AI experiment arm).
-    FreeUserNoAi,
-
     /// Enables the ask_user_question tool allowing the agent to ask clarifying questions.
     AskUserQuestion,
 
@@ -896,6 +889,10 @@ pub enum FeatureFlag {
 
     /// Gates the Source Control left-panel tab.
     SourceControlPanel,
+
+    /// Gates Gemini Enterprise (GEAP) BYOLLM, which lets users
+    /// route eliglible models to GEAP instead of Warp-managed inference.
+    GeminiEnterprise,
 }
 
 static FLAG_STATES: [AtomicBool; cardinality::<FeatureFlag>()] =
@@ -959,12 +956,11 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     #[cfg(not(windows))]
     FeatureFlag::SshRemoteServer,
     FeatureFlag::RemoteCodebaseIndexing,
-    FeatureFlag::AsyncFind,
     FeatureFlag::OrchestrationViewerStreamer,
     FeatureFlag::CliAgentFileLinks,
     FeatureFlag::GPTConfigurableContextWindow,
     FeatureFlag::RestorePromptOnInlineModelSelectorSearch,
-    FeatureFlag::SuperGrok,
+    FeatureFlag::WarpControlCli,
     FeatureFlag::SourceControlPanel,
 ];
 
@@ -972,8 +968,8 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
 /// All PREVIEW_FLAGS are also automatically added to dogfood builds (WarpDev).
 pub const PREVIEW_FLAGS: &[FeatureFlag] = &[
     #[cfg(target_os = "macos")]
-    FeatureFlag::DragTabsToWindows,
     FeatureFlag::GroupedTabs,
+    FeatureFlag::AsyncFind,
 ];
 
 /// Features enabled for all release builds (i.e.: everything but WarpLocal).
@@ -989,6 +985,8 @@ pub const RELEASE_FLAGS: &[FeatureFlag] = &[
     // Remote server binary is not yet supported on Windows.
     #[cfg(not(windows))]
     FeatureFlag::SshRemoteServer,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    FeatureFlag::DragTabsToWindows,
 ];
 
 /// Flags that we want to allow to switch at runtime (assuming RuntimeFeatureFlags is set)
@@ -1081,6 +1079,9 @@ impl FeatureFlag {
                 "Enables commit, push, and create-PR actions directly from the code review panel.",
             ),
             GroupedTabs => Some("Enables organizing tabs into named, collapsible groups."),
+            AsyncFind => Some(
+                "Runs terminal find on a background thread to keep the UI responsive while searching large outputs.",
+            ),
             _ => None,
         }
     }

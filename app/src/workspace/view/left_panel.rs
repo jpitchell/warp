@@ -44,9 +44,11 @@ use crate::ui_components::icons;
 use crate::util::bindings::keybinding_name_to_display_string;
 #[cfg(feature = "local_fs")]
 use crate::util::file::external_editor::EditorSettings;
-#[cfg(feature = "local_fs")]
-use crate::util::openable_file_type::resolve_file_target_with_editor_choice;
 use crate::util::openable_file_type::FileTarget;
+#[cfg(feature = "local_fs")]
+use crate::util::openable_file_type::{
+    is_markdown_file, resolve_file_target_with_editor_choice, EditorLayout,
+};
 use crate::workspace::view::conversation_list::view::{
     ConversationListView, Event as ConversationListViewEvent,
 };
@@ -318,11 +320,13 @@ impl LeftPanelView {
                     })
                     .collect();
 
-                // Update GlobalSearchView root directories (local only).
+                // Update GlobalSearchView root directories (local + remote).
+                let all_directories: Vec<LocalOrRemotePath> =
+                    directories.iter().map(|d| d.path.clone()).collect();
                 let global_search_view =
                     me.get_or_create_global_search_view_for_pane_group(active_pane_group.id(), ctx);
                 global_search_view.update(ctx, |view, view_ctx| {
-                    view.set_root_directories(local_paths.clone(), view_ctx);
+                    view.set_root_directories(all_directories, view_ctx);
                 });
 
                 // The Source Control panel follows the active session's most
@@ -679,11 +683,13 @@ impl LeftPanelView {
             })
             .collect();
 
-        // Update GlobalSearchView root directories (local only).
+        // Update GlobalSearchView root directories (local + remote).
+        let all_directories: Vec<LocalOrRemotePath> =
+            active_directories.iter().map(|d| d.path.clone()).collect();
         let global_search_view =
             self.get_or_create_global_search_view_for_pane_group(pane_group_id, ctx);
         global_search_view.update(ctx, |view, view_ctx| {
-            view.set_root_directories(local_paths.clone(), view_ctx);
+            view.set_root_directories(all_directories, view_ctx);
         });
 
         let most_recent_directory = active_directories.first().map(|d| d.path.clone());
@@ -796,7 +802,7 @@ impl LeftPanelView {
     ) {
         match event {
             GlobalSearchViewEvent::OpenMatch {
-                path,
+                location,
                 line_number,
                 column_num,
             } => {
@@ -806,13 +812,27 @@ impl LeftPanelView {
                 };
 
                 let settings = EditorSettings::as_ref(ctx);
-                let target = resolve_file_target_with_editor_choice(
-                    path,
-                    *settings.open_code_panels_file_editor,
-                    *settings.prefer_markdown_viewer,
-                    *settings.open_file_layout,
-                    None,
-                );
+                let target = match location {
+                    LocalOrRemotePath::Local(path) => resolve_file_target_with_editor_choice(
+                        path,
+                        *settings.open_code_panels_file_editor,
+                        *settings.prefer_markdown_viewer,
+                        *settings.open_file_layout,
+                        None,
+                    ),
+                    // Local-fs-based target resolution can't inspect remote
+                    // files; mirror the file tree's remote handling (code
+                    // editor, or markdown viewer by extension + preference).
+                    LocalOrRemotePath::Remote(remote) => {
+                        let is_markdown =
+                            is_markdown_file(std::path::Path::new(remote.path.as_str()));
+                        if is_markdown && *settings.prefer_markdown_viewer {
+                            FileTarget::MarkdownViewer(EditorLayout::SplitPane)
+                        } else {
+                            FileTarget::CodeEditor(EditorLayout::SplitPane)
+                        }
+                    }
+                };
 
                 send_telemetry_from_ctx!(
                     TelemetryEvent::CodePanelsFileOpened {
@@ -823,7 +843,7 @@ impl LeftPanelView {
                 );
 
                 ctx.emit(LeftPanelEvent::OpenFileWithTarget {
-                    location: LocalOrRemotePath::Local(path.clone()),
+                    location: location.clone(),
                     target,
                     line_col: Some(line_col),
                 });

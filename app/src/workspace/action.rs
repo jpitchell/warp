@@ -366,6 +366,7 @@ pub enum WorkspaceAction {
     OpenCodeReviewPanel(PaneViewLocator),
     /// Toggles the vertical tabs panel. This happens as an explicit action from the user.
     ToggleVerticalTabsPanel,
+    OpenVerticalTabsPanel,
     ToggleVerticalTabsSettingsPopup,
     SetVerticalTabsDisplayGranularity(VerticalTabsDisplayGranularity),
     SetVerticalTabsTabItemMode(VerticalTabsTabItemMode),
@@ -494,6 +495,8 @@ pub enum WorkspaceAction {
     },
     OpenCloudAgentSetupGuide,
     AttemptLoginGatedAIUpgrade,
+    /// Open the modal explaining Prompt Suggestions aren't available on the Free plan.
+    OpenPromptSuggestionsUnavailableModal,
     /// Dismisses the Wayland crash recovery banner and opens a link to our docs page with more
     /// information.
     #[cfg(target_os = "linux")]
@@ -637,12 +640,18 @@ pub enum WorkspaceAction {
         /// Optional prompt to send after summarization completes successfully.
         initial_prompt: Option<String>,
     },
-    /// Install the Warp CLI command to /usr/local/bin
+    /// Install the Oz CLI command to /usr/local/bin
     #[cfg(target_os = "macos")]
-    InstallCLI,
-    /// Uninstall the Warp CLI command from /usr/local/bin
+    InstallOz,
+    /// Uninstall the Oz CLI command from /usr/local/bin
     #[cfg(target_os = "macos")]
-    UninstallCLI,
+    UninstallOz,
+    /// Install the Warp Control CLI command to /usr/local/bin
+    #[cfg(target_os = "macos")]
+    InstallWarpctrl,
+    /// Uninstall the Warp Control CLI command from /usr/local/bin
+    #[cfg(target_os = "macos")]
+    UninstallWarpctrl,
     UndoRevertInCodeReviewPane {
         window_id: WindowId,
         view_id: EntityId,
@@ -676,11 +685,14 @@ pub enum WorkspaceAction {
     NavigatePrevPaneOrPanel,
     NavigateNextPaneOrPanel,
     ToggleProjectExplorer,
+    OpenProjectExplorer,
     ToggleGlobalSearch,
     ToggleHiddenFiles,
     OpenGlobalSearch,
     ToggleConversationListView,
     ToggleSourceControlPanel,
+    OpenConversationListView,
+    OpenAgentManagementView,
     /// Open the Build Plan Migration Modal (for debugging)
     #[cfg(debug_assertions)]
     OpenBuildPlanMigrationModal,
@@ -708,6 +720,22 @@ pub enum WorkspaceAction {
     /// Reset the orchestration launch modal dismissed state (for debugging)
     #[cfg(debug_assertions)]
     ResetOrchestrationLaunchModalState,
+    /// Open the auto-handoff sleep modal (for debugging)
+    #[cfg(debug_assertions)]
+    OpenAutoHandoffSleepModal,
+    /// Reset the auto-handoff sleep modal shown state (for debugging)
+    #[cfg(debug_assertions)]
+    ResetAutoHandoffSleepModalState,
+    /// Trigger the auto-handoff-to-cloud flow in-process, as if the machine
+    /// were about to sleep (for debugging)
+    #[cfg(debug_assertions)]
+    TriggerAutoHandoffToCloud,
+    /// Open the Free AI Removal Modal (for debugging)
+    #[cfg(debug_assertions)]
+    OpenFreeAiRemovalModal,
+    /// Reset the free AI removal modal seen state (for debugging)
+    #[cfg(debug_assertions)]
+    ResetFreeAiRemovalModalState,
     /// Install the opencode-warp plugin from GitHub into the global opencode config.
     #[cfg(debug_assertions)]
     InstallOpenCodeWarpPlugin,
@@ -935,7 +963,8 @@ impl WorkspaceAction {
             | SummarizeAIConversation { .. }
             | OpenRepository { .. }
             | SelectTabConfig(_)
-            | ToggleVerticalTabsPanel => true, // actions that actually change a state of the state of user's
+            | ToggleVerticalTabsPanel
+            | OpenVerticalTabsPanel => true, // actions that actually change a state of the state of user's
             // workspace would most likely require a save, so that if the app gets
             // restarted, the user can continue working
             AutoupdateFailureLink
@@ -987,6 +1016,7 @@ impl WorkspaceAction {
             | ClickedAIAssistantIcon
             | ToggleAIAssistant
             | OpenCloudAgentSetupGuide
+            | OpenPromptSuggestionsUnavailableModal
             | ToggleKeybindingsPage
             | ShowCommandSearch(_)
             | ToggleMouseReporting
@@ -1094,13 +1124,16 @@ impl WorkspaceAction {
             | NavigatePrevPaneOrPanel
             | NavigateNextPaneOrPanel
             | ToggleProjectExplorer
+            | OpenProjectExplorer
             | ToggleGlobalSearch
             | ToggleHiddenFiles
             | OpenGlobalSearch
             | ToggleConversationListView
             | ToggleSourceControlPanel
+            | OpenConversationListView
             | ToggleNotificationMailbox { .. }
             | ToggleAgentManagementView
+            | OpenAgentManagementView
             | OpenAgentManagementViewForEntry { .. }
             | ViewAgentRunsForEnvironment { .. }
             | ToggleAIDocumentPane { .. }
@@ -1144,6 +1177,11 @@ impl WorkspaceAction {
             | ResetOpenWarpLaunchModalState
             | OpenOrchestrationLaunchModal
             | ResetOrchestrationLaunchModalState
+            | OpenAutoHandoffSleepModal
+            | ResetAutoHandoffSleepModalState
+            | TriggerAutoHandoffToCloud
+            | OpenFreeAiRemovalModal
+            | ResetFreeAiRemovalModalState
             | InstallOpenCodeWarpPlugin
             | UseLocalOpenCodeWarpPlugin => false,
             #[cfg(not(target_family = "wasm"))]
@@ -1151,7 +1189,9 @@ impl WorkspaceAction {
             #[cfg(target_os = "macos")]
             SampleProcess => false,
             #[cfg(target_os = "macos")]
-            InstallCLI | UninstallCLI => false,
+            InstallOz | UninstallOz => false,
+            #[cfg(target_os = "macos")]
+            InstallWarpctrl | UninstallWarpctrl => false,
             #[cfg(feature = "local_fs")]
             FileRenamed { .. } => false, // File rename doesn't change workspace state
             #[cfg(feature = "local_fs")]
