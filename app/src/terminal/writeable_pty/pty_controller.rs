@@ -5,6 +5,7 @@ use std::sync::Arc;
 use async_channel::{Receiver, Sender};
 use parking_lot::FairMutex;
 use thiserror::Error;
+use warp_util::path::ShellFamily;
 use warpui::r#async::block_on;
 use warpui::{Entity, ModelContext, ModelHandle, SingletonEntity};
 
@@ -107,7 +108,7 @@ impl<T: EventLoopSender> PtyController<T> {
         terminal_model: Arc<FairMutex<TerminalModel>>,
         ctx: &mut ModelContext<Self>,
     ) -> Self {
-        ctx.subscribe_to_model(&model_event_dispatcher, |me, event, ctx| match event {
+        ctx.subscribe_to_model(&model_event_dispatcher, |me, _, event, ctx| match event {
             ModelEvent::Handler(AnsiHandlerEvent::UserCommandFinished) => {
                 me.is_user_command_executing = false;
             }
@@ -173,7 +174,7 @@ impl<T: EventLoopSender> PtyController<T> {
             _ => (),
         });
 
-        ctx.subscribe_to_model(&line_editor_status, |me, event, ctx| {
+        ctx.subscribe_to_model(&line_editor_status, |me, _, event, ctx| {
             if let LineEditorStatusEvent::Active = event {
                 let input_reporting_seq = me
                     .model_event_dispatcher
@@ -455,8 +456,6 @@ impl<T: EventLoopSender> PtyController<T> {
         shell_type: ShellType,
         ctx: &mut ModelContext<Self>,
     ) {
-        use warp_util::path::ShellFamily;
-
         // TODO(CORE-2099): Figure out a more robust solution here. Fish users
         // can redefine these functions via fish functions. Ideally this won't
         // break if the user redefines the `source` or `.` built-in.
@@ -734,6 +733,11 @@ fn bytes_to_execute_command(
     is_bracketed_paste_enabled: bool,
 ) -> Vec<u8> {
     let mut command_bytes = shell_type.kill_buffer_bytes().to_vec();
+    let command = match ShellFamily::from(shell_type) {
+        ShellFamily::Posix if cfg!(windows) => LINEFEED_REGEX.replace_all(command, "\n"),
+        ShellFamily::PowerShell => LINEFEED_REGEX.replace_all(command, "\r"),
+        _ => Cow::Borrowed(command),
+    };
 
     // Only execute the command via bracketed paste if the command is not empty. Some ZSH
     // bracketed paste magic functions return errors if bracketed paste is used without text
@@ -770,11 +774,7 @@ fn bytes_to_execute_command(
         }
     } else {
         let command_without_escapes = command.replace(escape_sequences::C0::ESC as char, "");
-        // This is a fix for PLAT-770 to allow multi-line commands in Powershell.
-        // In general, shells without bracketed paste don't handle `\n` that well,
-        // and in the case of PowerShell, it is explicitly ignored.
-        let command_without_newlines = LINEFEED_REGEX.replace_all(&command_without_escapes, "\r");
-        command_bytes.extend(command_without_newlines.as_bytes());
+        command_bytes.extend(command_without_escapes.as_bytes());
     }
     command_bytes.extend(shell_type.execute_command_bytes().to_vec());
     command_bytes
@@ -789,6 +789,10 @@ fn wrap_bytes_in_bracketed_paste(bytes: impl IntoIterator<Item = u8>) -> impl It
         .chain(bytes)
         .chain(escape_sequences::BRACKETED_PASTE_END.iter().copied())
 }
+
+#[cfg(test)]
+#[path = "pty_controller_command_bytes_tests.rs"]
+mod command_bytes_tests;
 
 #[derive(Error, Debug)]
 pub enum EventLoopSendError {
