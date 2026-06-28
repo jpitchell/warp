@@ -157,6 +157,15 @@ jobs:
           is_self_hosted: false
           install_release_deps: true
 
+      # Xcode 16.3+/26 no longer bundle the Metal Toolchain; it is a separately
+      # downloadable component. warpui/build.rs compiles .metal shaders via
+      # `xcrun metal` at build time, so without this the build panics with
+      # "cannot execute tool 'metal' due to missing Metal Toolchain". Runs after
+      # prepare_environment so it targets the pinned Xcode 26.
+      - name: Install Metal Toolchain
+        run: xcodebuild -downloadComponent MetalToolchain
+        shell: bash
+
       - name: Ensure rust target is installed
         run: rustup target add ${{ matrix.arch }}-apple-darwin
         shell: bash
