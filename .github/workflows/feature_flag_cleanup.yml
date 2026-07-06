@@ -1,8 +1,9 @@
 name: Feature Flag Cleanup
 
 on:
-  schedule:
-    - cron: '0 15 * * *' # 10am EST
+  # Scheduled runs disabled. Run manually via workflow_dispatch.
+  # schedule:
+  #   - cron: '0 15 * * *' # 10am EST
   workflow_dispatch:
 
 # Default to a read-only token. Jobs that need to push or open PRs widen

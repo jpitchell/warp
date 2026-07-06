@@ -20,8 +20,9 @@
 
 name: Stale Requested-Changes PRs
 on:
-  schedule:
-    - cron: '7 12 * * *' # 12:07 UTC daily (minute 7 avoids top-of-hour scheduler congestion)
+  # Scheduled runs disabled. Run manually via workflow_dispatch.
+  # schedule:
+  #   - cron: '7 12 * * *' # 12:07 UTC daily (minute 7 avoids top-of-hour scheduler congestion)
   workflow_dispatch:
     inputs:
       mode:

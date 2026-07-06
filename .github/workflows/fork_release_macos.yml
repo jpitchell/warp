@@ -28,11 +28,13 @@
 name: Fork Release (macOS)
 
 on:
-  schedule:
-    # Nightly at 08:00 UTC. The `check` job below short-circuits the (costly)
-    # macOS build unless the default branch has new commits since the last
-    # release.
-    - cron: "0 8 * * *"
+  # Scheduled nightly runs disabled — run manually via workflow_dispatch or by
+  # pushing a tag instead.
+  # schedule:
+  #   # Nightly at 08:00 UTC. The `check` job below short-circuits the (costly)
+  #   # macOS build unless the default branch has new commits since the last
+  #   # release.
+  #   - cron: "0 8 * * *"
   push:
     tags:
       - "v*"

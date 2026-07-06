@@ -1,7 +1,8 @@
 name: Update Dedupe Skill (Local)
 on:
-  schedule:
-    - cron: '30 9 * * 1'  # Every Monday at 09:30 UTC
+  # Scheduled runs disabled — failing on this fork. Run manually via workflow_dispatch.
+  # schedule:
+  #   - cron: '30 9 * * 1'  # Every Monday at 09:30 UTC
   workflow_dispatch:
     inputs:
       lookback_days:

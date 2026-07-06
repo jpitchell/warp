@@ -6,9 +6,11 @@
 
 name: Cut New Releases
 on:
-  schedule:
-    # Run this job every morning at 3am EST.
-    - cron: "0 8 * * *"
+  # Scheduled nightly runs disabled — they were failing on this fork (missing
+  # upstream infra/secrets). Run manually via workflow_dispatch instead.
+  # schedule:
+  #   # Run this job every morning at 3am EST.
+  #   - cron: "0 8 * * *"
 
   workflow_dispatch:
     inputs:
